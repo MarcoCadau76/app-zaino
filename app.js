@@ -1,4 +1,4 @@
-// ===== App Zaino — passo 2: stato condiviso sul Worker =====
+// ===== App Zaino — Fase 2: ruoli (Francesco / Genitore), annulla serata, orari =====
 
 // Indirizzo del Worker Cloudflare (pubblicato con wrangler dalla cartella worker/).
 const API_URL = "https://zaino.zaino-worker.workers.dev";
@@ -69,7 +69,16 @@ function contaObbligatori(lista, spuntati) {
   return { fatti: fatti.length, totale: obbligatori.length };
 }
 
-// ---------- Codice famiglia (resta salvato su ogni telefono) ----------
+// Elenco delle voci obbligatorie non ancora spuntate: [{ materia, nome }, ...]
+function vociMancanti(lista, spuntati) {
+  return lista.flatMap(g => g.oggetti
+    .filter(o => !o.facoltativo && !spuntati.includes(o.id))
+    .map(o => ({ materia: g.materia, nome: o.nome })));
+}
+
+// ---------- Codice di accesso (resta salvato su ogni telefono) ----------
+// La chiave "codice-famiglia" resta la stessa della Fase 1: i telefoni già
+// configurati continuano a funzionare se CODICE_FAMIGLIA = vecchio CODICE.
 
 function leggiCodice() {
   try {
@@ -88,64 +97,128 @@ function salvaCodice(codice) {
   }
 }
 
-// ---------- Stato: ora vive sul Worker, condiviso tra i telefoni ----------
+// ---------- Chiamate al Worker ----------
 
-async function chiamaApi(metodo, data, corpo) {
-  const risposta = await fetch(`${API_URL}/stato?data=${formattaData(data)}`, {
+// Chiamata generica: percorso es. "/stato?data=2026-11-26".
+// Errori: "codice" (401, codice non valido), "permesso" (403, serve il genitore).
+async function chiamaApi(metodo, percorso, corpo) {
+  const risposta = await fetch(`${API_URL}${percorso}`, {
     method: metodo,
     headers: { "Content-Type": "application/json", "X-Codice": leggiCodice() || "" },
     body: corpo ? JSON.stringify(corpo) : undefined
   });
   if (risposta.status === 401) throw new Error("codice");
+  if (risposta.status === 403) throw new Error("permesso");
   if (!risposta.ok) throw new Error(`Errore del server (${risposta.status})`);
   return risposta.json();
 }
 
+function conData(percorso, data) {
+  return `${percorso}?data=${formattaData(data)}`;
+}
+
+// Chiede al Worker chi sono: "francesco" o "genitore".
+async function caricaRuolo() {
+  const r = await chiamaApi("GET", "/sessione");
+  return r.ruolo;
+}
+
 async function caricaStato(data) {
-  const s = await chiamaApi("GET", data);
-  return { spuntati: s.spuntati, chiuso: s.chiuso };
+  const s = await chiamaApi("GET", conData("/stato", data));
+  return { spuntati: s.spuntati, chiuso: s.chiuso, annullata: s.annullata };
 }
 
-async function salvaStato(data, stato) {
-  try {
-    await chiamaApi("POST", data, stato);
-  } catch (e) {
-    mostraErrore("Salvataggio non riuscito: controlla la connessione e riprova.");
-  }
+// I salvataggi partono in fila, uno dopo l'altro: così due spunte rapide
+// non possono arrivare al server in ordine invertito.
+let codaSalvataggi = Promise.resolve();
+
+function salvaStato(data, stato) {
+  const copia = { spuntati: [...stato.spuntati], chiuso: stato.chiuso };
+  codaSalvataggi = codaSalvataggi
+    .then(() => chiamaApi("POST", conData("/stato", data), copia))
+    .then(() => nascondiErrore())
+    .catch(() => mostraErrore("Salvataggio non riuscito: controlla la connessione e riprova."));
+  return codaSalvataggi;
 }
 
-// ---------- Disegno della pagina ----------
+async function impostaSerata(data, annullata) {
+  return chiamaApi("POST", conData("/serata", data), { annullata });
+}
+
+async function caricaOrari() {
+  const r = await chiamaApi("GET", "/orari");
+  return r.orari;
+}
+
+async function salvaOrari(orari) {
+  const r = await chiamaApi("POST", "/orari", orari);
+  return r.orari;
+}
+
+// ---------- Messaggi d'errore (spazio fisso sopra l'app) ----------
 
 function mostraErrore(messaggio) {
-  let el = document.getElementById("errore");
-  if (!el) {
-    el = document.createElement("p");
-    el.id = "errore";
-    el.className = "errore";
-    document.getElementById("app").prepend(el);
-  }
+  const el = document.getElementById("errore");
   el.textContent = messaggio;
+  el.hidden = false;
 }
+
+function nascondiErrore() {
+  document.getElementById("errore").hidden = true;
+}
+
+// ---------- Schermata: inserimento codice ----------
 
 function chiediCodice(messaggio) {
   const app = document.getElementById("app");
-  app.innerHTML = `<h1>Codice famiglia</h1>
+  app.innerHTML = `<h1>Codice di accesso</h1>
     <p>${messaggio}</p>
-    <input id="codice" type="password" autocomplete="off">
-    <button id="entra">Entra</button>`;
-  document.getElementById("entra").addEventListener("click", () => {
+    <form id="form-codice">
+      <input id="codice" type="password" autocomplete="off">
+      <button type="submit">Entra</button>
+    </form>`;
+  // Con un form funziona anche il tasto "Invio" della tastiera.
+  document.getElementById("form-codice").addEventListener("submit", ev => {
+    ev.preventDefault();
     salvaCodice(document.getElementById("codice").value.trim());
     avvia();
   });
 }
 
-function disegna(config, domani, stato) {
+// Tasto in fondo alla pagina per cambiare codice (utile anche per i test).
+function htmlEsci() {
+  return `<button id="esci" class="secondario">Cambia codice</button>`;
+}
+
+function collegaEsci() {
+  const esci = document.getElementById("esci");
+  if (esci) esci.addEventListener("click", () => {
+    salvaCodice(null);
+    avvia();
+  });
+}
+
+function titoloData(data) {
+  return data.toLocaleDateString("it-IT", { weekday: "long", day: "numeric", month: "long" });
+}
+
+// ---------- Schermata Francesco: la checklist ----------
+
+function disegnaFrancesco(config, domani, stato) {
   const app = document.getElementById("app");
-  const titolo = domani.toLocaleDateString("it-IT", { weekday: "long", day: "numeric", month: "long" });
+  const titolo = titoloData(domani);
 
   const motivo = motivoNoScuola(domani, config);
   if (motivo) {
-    app.innerHTML = `<h1>Domani, ${titolo}</h1><p class="riposo">Niente scuola: ${motivo} 🎉</p>`;
+    app.innerHTML = `<h1>Domani, ${titolo}</h1><p class="riposo">Niente scuola: ${motivo} 🎉</p>${htmlEsci()}`;
+    collegaEsci();
+    return;
+  }
+
+  if (stato.annullata) {
+    app.innerHTML = `<h1>Domani, ${titolo}</h1>
+      <p class="riposo">Niente zaino stasera: domani niente scuola 🎉</p>${htmlEsci()}`;
+    collegaEsci();
     return;
   }
 
@@ -173,16 +246,17 @@ function disegna(config, domani, stato) {
   } else {
     html += `<button id="chiudi" ${completo ? "" : "disabled"}>Zaino chiuso</button>`;
   }
+  html += htmlEsci();
 
   app.innerHTML = html;
-  collegaEventi(config, domani, stato);
+  collegaEventiFrancesco(config, domani, stato);
 }
 
 // Ogni modifica: aggiorno subito la pagina, poi salvo sul server.
 // Così l'app resta reattiva anche se la rete è lenta.
-function collegaEventi(config, domani, stato) {
+function collegaEventiFrancesco(config, domani, stato) {
   const aggiorna = () => {
-    disegna(config, domani, stato);
+    disegnaFrancesco(config, domani, stato);
     salvaStato(domani, stato);
   };
 
@@ -207,35 +281,154 @@ function collegaEventi(config, domani, stato) {
     stato.chiuso = false;
     aggiorna();
   });
+
+  collegaEsci();
+}
+
+// ---------- Schermata Genitore: stato, annulla serata, orari ----------
+
+function htmlStatoGenitore(config, domani, stato) {
+  const motivo = motivoNoScuola(domani, config);
+  if (motivo) return `<p class="riposo">Niente scuola: ${motivo}</p>`;
+
+  if (stato.annullata) {
+    return `<p class="riposo">Serata annullata: niente notifiche stasera.</p>
+      <button id="ripristina">Ripristina serata</button>`;
+  }
+
+  const lista = costruisciLista(domani, config);
+  const mancanti = vociMancanti(lista, stato.spuntati);
+  let html;
+  if (stato.chiuso) {
+    html = `<p class="pronto">Zaino chiuso ✅</p>`;
+  } else if (mancanti.length === 0) {
+    html = `<p class="progresso">Lista completa, zaino non ancora chiuso.</p>`;
+  } else {
+    html = `<p class="progresso">Mancano ${mancanti.length} voci:</p><ul class="mancanti">`
+      + mancanti.map(v => `<li>${v.materia}: ${v.nome}</li>`).join("")
+      + `</ul>`;
+  }
+  html += `<button id="aggiorna" class="secondario">Aggiorna</button>
+    <button id="annulla" class="pericolo">Domani niente scuola</button>`;
+  return html;
+}
+
+function htmlOrari(orari) {
+  return `<h2>Orari notifiche</h2>
+    <form id="form-orari">
+      <label class="campo">Promemoria a Francesco
+        <input type="time" name="promemoria" value="${orari.promemoria}" required></label>
+      <label class="campo">Solleciti ogni (minuti)
+        <input type="number" name="intervallo_solleciti_min" min="5" max="60"
+               value="${orari.intervallo_solleciti_min}" required></label>
+      <label class="campo">Solleciti fino alle
+        <input type="time" name="fine_solleciti" value="${orari.fine_solleciti}" required></label>
+      <label class="campo">Avviso ai genitori alle
+        <input type="time" name="avviso_genitori" value="${orari.avviso_genitori}" required></label>
+      <label><input type="checkbox" name="avvisa_genitori_se_pronto"
+        ${orari.avvisa_genitori_se_pronto ? "checked" : ""}> Avvisami quando lo zaino è pronto</label>
+      <button type="submit">Salva orari</button>
+    </form>`;
+}
+
+function disegnaGenitore(config, domani, stato, orari) {
+  const app = document.getElementById("app");
+  app.innerHTML = `<h1>Genitori · ${titoloData(domani)}</h1>
+    ${htmlStatoGenitore(config, domani, stato)}
+    ${htmlOrari(orari)}
+    ${htmlEsci()}`;
+  collegaEventiGenitore(config, domani, stato, orari);
+}
+
+function collegaEventiGenitore(config, domani, stato, orari) {
+  const aggiorna = document.getElementById("aggiorna");
+  if (aggiorna) aggiorna.addEventListener("click", () => avvia());
+
+  // Annulla / ripristina: aggiorno lo stato locale solo se il server conferma.
+  const cambiaSerata = async annullata => {
+    try {
+      await impostaSerata(domani, annullata);
+      nascondiErrore();
+      disegnaGenitore(config, domani, { ...stato, annullata }, orari);
+    } catch (e) {
+      mostraErrore("Operazione non riuscita: controlla la connessione e riprova.");
+    }
+  };
+
+  const annulla = document.getElementById("annulla");
+  if (annulla) annulla.addEventListener("click", () => {
+    if (confirm("Domani niente scuola? Le notifiche di stasera verranno annullate.")) {
+      cambiaSerata(true);
+    }
+  });
+
+  const ripristina = document.getElementById("ripristina");
+  if (ripristina) ripristina.addEventListener("click", () => cambiaSerata(false));
+
+  document.getElementById("form-orari").addEventListener("submit", async ev => {
+    ev.preventDefault();
+    const f = ev.target.elements;
+    const nuovi = {
+      promemoria: f.promemoria.value,
+      intervallo_solleciti_min: Number(f.intervallo_solleciti_min.value),
+      fine_solleciti: f.fine_solleciti.value,
+      avviso_genitori: f.avviso_genitori.value,
+      avvisa_genitori_se_pronto: f.avvisa_genitori_se_pronto.checked
+    };
+    if (nuovi.promemoria >= nuovi.fine_solleciti) {
+      mostraErrore("Il promemoria deve essere prima della fine dei solleciti.");
+      return;
+    }
+    try {
+      const salvati = await salvaOrari(nuovi);
+      nascondiErrore();
+      disegnaGenitore(config, domani, stato, salvati);
+      alert("Orari salvati ✅");
+    } catch (e) {
+      mostraErrore("Orari non salvati: controlla i valori e la connessione.");
+    }
+  });
+
+  collegaEsci();
 }
 
 // ---------- Avvio ----------
 
 async function avvia() {
-  const risposta = await fetch("config.json");
-  const config = await risposta.json();
-  const domani = giornoDopo(leggiOggi());
+  nascondiErrore();
+  const app = document.getElementById("app");
 
-  if (motivoNoScuola(domani, config)) {
-    disegna(config, domani, { spuntati: [], chiuso: false });
+  let config;
+  try {
+    config = await (await fetch("config.json")).json();
+  } catch {
+    app.innerHTML = `<p class="errore">Impossibile caricare la configurazione: controlla la connessione.</p>`;
     return;
   }
+  const domani = giornoDopo(leggiOggi());
 
   if (!leggiCodice()) {
-    chiediCodice("Inserisci il codice famiglia per iniziare.");
+    chiediCodice("Inserisci il codice di Francesco oppure quello dei genitori.");
     return;
   }
 
   try {
-    const stato = await caricaStato(domani);
-    disegna(config, domani, stato);
+    const ruolo = await caricaRuolo();
+    if (ruolo === "genitore") {
+      const [stato, orari] = await Promise.all([caricaStato(domani), caricaOrari()]);
+      disegnaGenitore(config, domani, stato, orari);
+    } else if (motivoNoScuola(domani, config)) {
+      // Francesco, giorno senza scuola: non serve chiedere lo stato al server.
+      disegnaFrancesco(config, domani, { spuntati: [], chiuso: false, annullata: false });
+    } else {
+      disegnaFrancesco(config, domani, await caricaStato(domani));
+    }
   } catch (e) {
     if (e.message === "codice") {
       salvaCodice(null);
       chiediCodice("Codice errato, riprova.");
     } else {
-      document.getElementById("app").innerHTML =
-        `<p class="errore">Impossibile caricare la lista: controlla la connessione.</p>`;
+      app.innerHTML = `<p class="errore">Impossibile caricare i dati: controlla la connessione.</p>`;
     }
   }
 }

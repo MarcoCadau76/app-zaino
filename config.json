@@ -2,6 +2,7 @@
   "impostazioni": {
     "promemoria": "21:00",
     "intervallo_solleciti_min": 10,
+    "fine_solleciti": "22:00",
     "avviso_genitori": "21:30",
     "avvisa_genitori_se_pronto": true
   },
