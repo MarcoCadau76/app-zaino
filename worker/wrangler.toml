@@ -9,5 +9,14 @@ compatibility_date = "2026-11-01"
 binding = "ZAINO"
 id = "dca758371f8d4cb089c95471994c6e9d"   # KV "zaino-stato"
 
-# I segreti (CODICE) NON stanno qui: si impostano con
-#   npx wrangler secret put CODICE
+# I segreti NON stanno qui: si impostano con  npx wrangler secret put NOME
+#   CODICE_FAMIGLIA, CODICE_GENITORI, VAPID_PRIVATE
+# Per le prove in locale (wrangler dev) stanno in worker/.dev.vars (escluso da git).
+
+# Valori pubblici (non segreti) letti dal Worker come env.NOME.
+[vars]
+# Chiave pubblica VAPID generata con: node strumenti/genera-vapid.mjs
+# (la privata va SOLO in: npx wrangler secret put VAPID_PRIVATE)
+VAPID_PUBLIC = "DA_COMPILARE"
+# Contatto richiesto da Apple/Google nella firma VAPID (URL o mailto:).
+VAPID_SUBJECT = "https://marcocadau76.github.io/app-zaino/"

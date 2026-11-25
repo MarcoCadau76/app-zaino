@@ -1,9 +1,9 @@
-// ===== Service worker App Zaino — Fase 3: app installabile e funzionante offline =====
+// ===== Service worker App Zaino — Fasi 3-4: app installabile, offline, notifiche push =====
 // Strategia "prima la rete": se c'è connessione scarico sempre la versione nuova
 // (così ogni aggiornamento su GitHub arriva subito) e ne tengo una copia;
 // la copia in cache si usa SOLO quando la rete non risponde.
 // Le chiamate al Worker (altro dominio) non passano di qui: lo stato è sempre quello vero.
-// In Fase 4 qui arriverà anche la gestione delle notifiche push.
+// Fase 4: riceve le notifiche push (testo già dentro, cifrato) e le mostra.
 
 // Cambia il numero quando cambi l'elenco dei file: la cache vecchia viene cancellata.
 const NOME_CACHE = "zaino-v1";
@@ -72,3 +72,41 @@ async function primaLaRete(richiesta) {
     return new Response("Offline", { status: 503, headers: { "Content-Type": "text/plain" } });
   }
 }
+
+// ---------- Notifiche push (Fase 4) ----------
+
+// Arriva una push: il browser l'ha già decifrata, il contenuto è JSON
+// { titolo, testo, tag }. iOS esige che OGNI push mostri una notifica,
+// quindi se il contenuto manca o è rovinato ne mostro comunque una generica.
+self.addEventListener("push", evento => {
+  let dati = {};
+  try {
+    dati = evento.data ? evento.data.json() : {};
+  } catch {
+    dati = {};
+  }
+  const titolo = dati.titolo || "Zaino";
+  const opzioni = {
+    body: dati.testo || "Apri l'app per vedere lo zaino di domani.",
+    icon: "icons/icon-192.png",
+    badge: "icons/icon-192.png",
+    // Stesso tag = la notifica nuova sostituisce la vecchia (niente pila di solleciti).
+    tag: dati.tag || "zaino",
+    renotify: true,
+    data: { url: "./" }
+  };
+  evento.waitUntil(self.registration.showNotification(titolo, opzioni));
+});
+
+// Tocco sulla notifica: porto in primo piano l'app se è già aperta,
+// altrimenti la apro.
+self.addEventListener("notificationclick", evento => {
+  evento.notification.close();
+  evento.waitUntil((async () => {
+    const finestre = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+    for (const finestra of finestre) {
+      if ("focus" in finestra) return finestra.focus();
+    }
+    return self.clients.openWindow(evento.notification.data?.url || "./");
+  })());
+});

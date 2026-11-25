@@ -1,18 +1,28 @@
-// ===== Worker App Zaino — Fase 2: ruoli, annulla serata, orari =====
+// ===== Worker App Zaino — Fase 4: ruoli, serata, orari, notifiche push =====
 // API (ogni richiesta deve avere l'intestazione X-Codice):
-//   GET  /sessione                      -> { ruolo: "francesco" | "genitore" }
-//   GET  /stato?data=AAAA-MM-GG         -> { spuntati, chiuso, annullata }
-//   POST /stato?data=AAAA-MM-GG         corpo { spuntati, chiuso }        (tutti)
-//   POST /serata?data=AAAA-MM-GG        corpo { annullata: bool }         (solo genitori)
-//   GET  /orari                         -> { orari, personalizzati }      (tutti)
-//   POST /orari                         corpo { promemoria, ... }         (solo genitori)
+//   GET    /sessione                   -> { ruolo, vapid }  (vapid = chiave pubblica per iscriversi)
+//   GET    /stato?data=AAAA-MM-GG      -> { spuntati, chiuso, annullata }
+//   POST   /stato?data=AAAA-MM-GG      corpo { spuntati, chiuso }                  (tutti)
+//   POST   /serata?data=AAAA-MM-GG     corpo { annullata: bool }                   (solo genitori)
+//   GET    /orari                      -> { orari, personalizzati }                (tutti)
+//   POST   /orari                      corpo { promemoria, ... }                   (solo genitori)
+//   POST   /iscrizione                 corpo { iscrizione, dispositivo }           (tutti)
+//   DELETE /iscrizione                 corpo { endpoint }                          (tutti)
+//   GET    /iscrizioni                 -> { dispositivi: [...] }                   (solo genitori)
+//   POST   /prova                      corpo { destinatari: tutti|francesco|genitore } (solo genitori)
 // Il ruolo si deduce dal codice: CODICE_GENITORI -> genitore, CODICE_FAMIGLIA -> francesco.
+
+import { inviaPush, base64UrlInBytes } from "./push.js";
 
 const ORIGINE_PERMESSA = "https://marcocadau76.github.io";
 const CONFIG_URL = "https://marcocadau76.github.io/app-zaino/config.json";
 const TTL_SERATA = 60 * 60 * 24 * 14;      // i dati di una sera si cancellano dopo 14 giorni
 const DURATA_CACHE_CONFIG = 5 * 60 * 1000; // config.json riletto al massimo ogni 5 minuti
 const RE_DATA = /^\d{4}-\d{2}-\d{2}$/;
+const MAX_ISCRIZIONI = 20;                 // limite di sicurezza: l'elenco non cresce all'infinito
+
+// Servizi push ammessi: il Worker spedisce solo a questi indirizzi.
+const HOST_PUSH = ["web.push.apple.com", "fcm.googleapis.com", "updates.push.services.mozilla.com", "notify.windows.com"];
 
 // Copia di config.json tenuta in memoria dall'istanza del Worker.
 let configInMemoria = null;
@@ -23,7 +33,7 @@ let configLettaAlle = 0;
 function intestazioniCors() {
   return {
     "Access-Control-Allow-Origin": ORIGINE_PERMESSA,
-    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, X-Codice"
   };
 }
@@ -137,12 +147,91 @@ function erroreOrari(o) {
   return null;
 }
 
+// true se l'indirizzo è https e appartiene a un servizio push conosciuto.
+function endpointValido(testo) {
+  try {
+    const u = new URL(testo);
+    return u.protocol === "https:"
+      && HOST_PUSH.some(h => u.hostname === h || u.hostname.endsWith(`.${h}`));
+  } catch {
+    return false;
+  }
+}
+
+// Una chiave base64url che, decodificata, è lunga esattamente `byte`.
+function chiaveValida(testo, byte) {
+  if (typeof testo !== "string" || !/^[A-Za-z0-9_-]+=*$/.test(testo)) return false;
+  try {
+    return base64UrlInBytes(testo.replace(/=+$/, "")).length === byte;
+  } catch {
+    return false;
+  }
+}
+
+function iscrizioneValida(i) {
+  return i
+    && endpointValido(i.endpoint)
+    && i.keys
+    && chiaveValida(i.keys.p256dh, 65)
+    && chiaveValida(i.keys.auth, 16);
+}
+
 async function leggiCorpo(request) {
   try {
     return await request.json();
   } catch {
     return null;
   }
+}
+
+// ---------- Iscrizioni push nel KV (una sola chiave "iscrizioni") ----------
+
+async function leggiIscrizioni(env) {
+  return (await env.ZAINO.get("iscrizioni", "json")) || [];
+}
+
+async function scriviIscrizioni(env, lista) {
+  await env.ZAINO.put("iscrizioni", JSON.stringify(lista));
+}
+
+// Traduce il codice HTTP del servizio push in una frase per i genitori.
+function descriviEsito(stato) {
+  if (stato >= 200 && stato < 300) return "inviata ✅";
+  if (stato === 404 || stato === 410) return "iscrizione scaduta: rimossa";
+  if (stato === 0) return "errore di rete";
+  return `rifiutata (${stato})`;
+}
+
+// Invia un messaggio a tutte le iscrizioni del ruolo indicato
+// ("francesco", "genitore", oppure null = tutti). Le iscrizioni scadute
+// (404/410) vengono tolte dal KV: è l'unico caso in cui qui si scrive.
+// Restituisce il resoconto per dispositivo.
+// Usata anche dal cron della Fase 5.
+async function inviaNotifica(env, ruolo, messaggio, ttl) {
+  const lista = await leggiIscrizioni(env);
+  const destinatari = lista.filter(i => !ruolo || i.ruolo === ruolo);
+
+  const esiti = await Promise.all(destinatari.map(async i => {
+    try {
+      const { stato, dettaglio } = await inviaPush(i, messaggio, env, ttl);
+      return { i, stato, dettaglio };
+    } catch (e) {
+      return { i, stato: 0, dettaglio: String(e).slice(0, 200) };
+    }
+  }));
+
+  const scadute = new Set(esiti.filter(e => e.stato === 404 || e.stato === 410).map(e => e.i.endpoint));
+  if (scadute.size > 0) {
+    await scriviIscrizioni(env, lista.filter(i => !scadute.has(i.endpoint)));
+  }
+
+  return esiti.map(({ i, stato, dettaglio }) => ({
+    dispositivo: i.dispositivo,
+    ruolo: i.ruolo,
+    stato,
+    esito: descriviEsito(stato),
+    dettaglio
+  }));
 }
 
 // ---------- Gestori delle singole API ----------
@@ -216,6 +305,79 @@ async function gestisciOrari(request, env, ruolo) {
   return rispostaJson({ errore: "metodo non permesso" }, 405);
 }
 
+// Iscrizione di un telefono alle notifiche (POST) o cancellazione (DELETE).
+// Il ruolo salvato è quello del codice usato: Francesco non può iscriversi come genitore.
+// Si scrive nel KV solo se qualcosa è cambiato: l'app la rimanda a ogni apertura.
+async function gestisciIscrizione(request, env, ruolo) {
+  const corpo = await leggiCorpo(request);
+  const lista = await leggiIscrizioni(env);
+
+  if (request.method === "POST") {
+    const i = corpo && corpo.iscrizione;
+    if (!iscrizioneValida(i)) return rispostaJson({ errore: "iscrizione non valida" }, 400);
+    const dispositivo = typeof corpo.dispositivo === "string" ? corpo.dispositivo.slice(0, 40) : "Telefono";
+
+    const esistente = lista.find(x => x.endpoint === i.endpoint);
+    if (esistente
+      && esistente.ruolo === ruolo
+      && esistente.dispositivo === dispositivo
+      && esistente.keys.p256dh === i.keys.p256dh
+      && esistente.keys.auth === i.keys.auth) {
+      return rispostaJson({ salvata: false }); // già uguale: nessuna scrittura
+    }
+
+    const nuova = {
+      endpoint: i.endpoint,
+      keys: { p256dh: i.keys.p256dh, auth: i.keys.auth },
+      ruolo,
+      dispositivo,
+      creata: esistente ? esistente.creata : new Date().toISOString()
+    };
+    // Tolgo la vecchia versione, aggiungo la nuova in fondo, tengo le ultime MAX_ISCRIZIONI.
+    const aggiornata = [...lista.filter(x => x.endpoint !== i.endpoint), nuova].slice(-MAX_ISCRIZIONI);
+    await scriviIscrizioni(env, aggiornata);
+    return rispostaJson({ salvata: true });
+  }
+
+  if (request.method === "DELETE") {
+    const endpoint = corpo && corpo.endpoint;
+    const rimasta = lista.filter(x => x.endpoint !== endpoint);
+    if (rimasta.length !== lista.length) await scriviIscrizioni(env, rimasta);
+    return rispostaJson({ rimossa: rimasta.length !== lista.length });
+  }
+
+  return rispostaJson({ errore: "metodo non permesso" }, 405);
+}
+
+// Elenco dei telefoni iscritti (senza indirizzi né chiavi), per la schermata genitore.
+async function gestisciElencoIscrizioni(request, env, ruolo) {
+  if (request.method !== "GET") return rispostaJson({ errore: "metodo non permesso" }, 405);
+  if (ruolo !== "genitore") return rispostaJson({ errore: "solo genitori" }, 403);
+  const lista = await leggiIscrizioni(env);
+  return rispostaJson({
+    dispositivi: lista.map(i => ({ dispositivo: i.dispositivo, ruolo: i.ruolo, creata: i.creata }))
+  });
+}
+
+// Notifica di prova, solo per i genitori.
+async function gestisciProva(request, env, ruolo) {
+  if (request.method !== "POST") return rispostaJson({ errore: "metodo non permesso" }, 405);
+  if (ruolo !== "genitore") return rispostaJson({ errore: "solo genitori" }, 403);
+  if (!env.VAPID_PUBLIC || !env.VAPID_PRIVATE) {
+    return rispostaJson({ errore: "chiavi VAPID non configurate sul Worker" }, 500);
+  }
+
+  const corpo = (await leggiCorpo(request)) || {};
+  const scelta = ["francesco", "genitore"].includes(corpo.destinatari) ? corpo.destinatari : null;
+  const messaggio = {
+    titolo: "Zaino · prova",
+    testo: "Notifica di prova inviata dai genitori ✅",
+    tag: "zaino-prova"
+  };
+  const esiti = await inviaNotifica(env, scelta, messaggio, 600);
+  return rispostaJson({ esiti });
+}
+
 // ---------- Punto di ingresso ----------
 
 export default {
@@ -235,7 +397,7 @@ export default {
     try {
       switch (url.pathname) {
         case "/sessione":
-          return rispostaJson({ ruolo });
+          return rispostaJson({ ruolo, vapid: env.VAPID_PUBLIC || null });
         case "/stato":
           if (!RE_DATA.test(data)) return rispostaJson({ errore: "data non valida" }, 400);
           return await gestisciStato(request, env, data);
@@ -244,6 +406,12 @@ export default {
           return await gestisciSerata(request, env, data, ruolo);
         case "/orari":
           return await gestisciOrari(request, env, ruolo);
+        case "/iscrizione":
+          return await gestisciIscrizione(request, env, ruolo);
+        case "/iscrizioni":
+          return await gestisciElencoIscrizioni(request, env, ruolo);
+        case "/prova":
+          return await gestisciProva(request, env, ruolo);
         default:
           return rispostaJson({ errore: "non trovato" }, 404);
       }

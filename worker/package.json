@@ -1,11 +1,14 @@
 {
   "name": "zaino-worker",
   "private": true,
+  "type": "module",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy"
+    "deploy": "wrangler deploy",
+    "test": "node test/push.test.mjs"
   },
   "devDependencies": {
+    "http_ece": "^1.2.0",
     "wrangler": "^4.0.0"
   }
 }
