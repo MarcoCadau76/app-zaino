@@ -1,0 +1,43 @@
+{
+  "impostazioni": {
+    "promemoria": "21:00",
+    "intervallo_solleciti_min": 10,
+    "avviso_genitori": "21:30",
+    "avvisa_genitori_se_pronto": true
+  },
+  "anno_scolastico": { "inizio": "2026-09-16", "fine": "2027-06-08" },
+  "chiusure": [
+    { "dal": "2026-12-08", "al": "2026-12-08", "motivo": "Immacolata" },
+    { "dal": "2026-12-23", "al": "2027-01-06", "motivo": "Vacanze di Natale" },
+    { "dal": "2027-02-09", "al": "2027-02-09", "motivo": "Martedì grasso" },
+    { "dal": "2027-03-25", "al": "2027-03-30", "motivo": "Vacanze di Pasqua" },
+    { "dal": "2027-04-28", "al": "2027-04-28", "motivo": "Sa Die de sa Sardigna" },
+    { "dal": "2027-05-01", "al": "2027-05-01", "motivo": "Festa del lavoro" },
+    { "dal": "2027-06-02", "al": "2027-06-02", "motivo": "Festa della Repubblica" }
+  ],
+  "sempre": ["Diario", "Astuccio"],
+  "materie": {
+    "Arte":              ["Libro", "Cartella disegni"],
+    "Aritmetica":        ["Libro", "Quaderno"],
+    "Geometria":         ["Libro", "Quaderno", "Righello e squadra"],
+    "Francese":          ["Libro", "Quaderno"],
+    "Inglese":           ["Libro", "Quaderno"],
+    "Musica":            ["Libro", { "nome": "Tastiera", "facoltativo": true }],
+    "Grammatica":        ["Libro", "Quaderno"],
+    "Antologia":         ["Libro"],
+    "Epica":             ["Libro"],
+    "Scienze":           ["Libro", "Quaderno"],
+    "Storia":            ["Libro", "Quaderno"],
+    "Geografia":         ["Libro", "Quaderno"],
+    "Tecnologia":        ["Libro", "Quaderno"],
+    "Educazione fisica": ["Libro", "Tuta", "Scarpe"]
+  },
+  "orario": {
+    "lunedi":    ["Arte", "Aritmetica", "Francese", "Musica"],
+    "martedi":   ["Grammatica", "Antologia", "Geometria", "Scienze", "Storia"],
+    "mercoledi": ["Aritmetica", "Scienze", "Inglese", "Educazione fisica", "Geografia"],
+    "giovedi":   ["Arte", "Inglese", "Francese", "Grammatica", "Epica"],
+    "venerdi":   ["Inglese", "Educazione fisica", "Storia", "Tecnologia", "Geometria"],
+    "sabato":    ["Tecnologia", "Geografia", "Musica", "Epica", "Antologia"]
+  }
+}
