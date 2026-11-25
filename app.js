@@ -238,9 +238,35 @@ function chiediCodice(messaggio) {
   });
 }
 
-// Tasto in fondo alla pagina per cambiare codice (utile anche per i test).
+// ---------- Installazione come app (PWA) ----------
+
+// true se l'app è aperta dall'icona sulla Home (non dentro Safari/Chrome).
+function eInstallata() {
+  return window.matchMedia("(display-mode: standalone)").matches
+    || window.navigator.standalone === true; // vecchio modo di iOS
+}
+
+// true su iPhone/iPad (gli iPad recenti si presentano come "Macintosh" con touch).
+function eIos() {
+  const ua = navigator.userAgent;
+  return /iPhone|iPad|iPod/.test(ua) || (ua.includes("Macintosh") && navigator.maxTouchPoints > 1);
+}
+
+// Suggerimento mostrato solo se l'app è aperta nel browser e non installata.
+function htmlSuggerimentoInstallazione() {
+  if (eInstallata()) return "";
+  const istruzioni = eIos()
+    ? "In Safari tocca <b>Condividi</b> (il quadrato con la freccia) → <b>Aggiungi alla schermata Home</b>."
+    : "Nel menu di Chrome (⋮) tocca <b>Installa app</b> oppure <b>Aggiungi a schermata Home</b>.";
+  return `<p class="installa">📲 Installa l'app per ricevere i promemoria. ${istruzioni}
+    Dopo l'installazione aprila dall'icona e reinserisci il codice.</p>`;
+}
+
+// Fondo pagina: suggerimento di installazione (se serve) e tasto
+// per cambiare codice (utile anche per i test).
 function htmlEsci() {
-  return `<button id="esci" class="secondario">Cambia codice</button>`;
+  return `${htmlSuggerimentoInstallazione()}
+    <button id="esci" class="secondario">Cambia codice</button>`;
 }
 
 function collegaEsci() {
@@ -510,4 +536,16 @@ async function avvia() {
   }
 }
 
-if (typeof document !== "undefined") avvia();
+// Registra il service worker (sw.js): rende l'app installabile e utilizzabile
+// offline. Se il browser non lo supporta l'app funziona lo stesso.
+function registraServiceWorker() {
+  if (!("serviceWorker" in navigator)) return;
+  navigator.serviceWorker.register("sw.js").catch(e => {
+    console.warn("Service worker non registrato:", e);
+  });
+}
+
+if (typeof document !== "undefined") {
+  registraServiceWorker();
+  avvia();
+}
