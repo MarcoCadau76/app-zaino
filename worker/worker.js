@@ -13,7 +13,6 @@ const CONFIG_URL = "https://marcocadau76.github.io/app-zaino/config.json";
 const TTL_SERATA = 60 * 60 * 24 * 14;      // i dati di una sera si cancellano dopo 14 giorni
 const DURATA_CACHE_CONFIG = 5 * 60 * 1000; // config.json riletto al massimo ogni 5 minuti
 const RE_DATA = /^\d{4}-\d{2}-\d{2}$/;
-const RE_ORA = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 // Copia di config.json tenuta in memoria dall'istanza del Worker.
 let configInMemoria = null;
@@ -96,17 +95,46 @@ function statoValido(corpo) {
     && typeof corpo.chiuso === "boolean";
 }
 
+// Controlla gli orari e restituisce null se vanno bene, altrimenti il messaggio
+// della PRIMA regola non rispettata. Regole:
+//   - tutti gli orari tra le 19:00 e le 23:00 (estremi compresi);
+//   - promemoria < avviso genitori <= fine solleciti;
+//   - intervallo solleciti: intero tra 5 e 30 minuti.
 // Le ore "HH:MM" si confrontano bene anche come stringhe ("21:00" < "22:00").
-function orariValidi(o) {
-  return o
-    && RE_ORA.test(o.promemoria)
-    && RE_ORA.test(o.fine_solleciti)
-    && RE_ORA.test(o.avviso_genitori)
-    && Number.isInteger(o.intervallo_solleciti_min)
-    && o.intervallo_solleciti_min >= 5
-    && o.intervallo_solleciti_min <= 60
-    && typeof o.avvisa_genitori_se_pronto === "boolean"
-    && o.promemoria < o.fine_solleciti;
+// ATTENZIONE: copia identica in app.js (erroreOrari): se cambi una, cambia l'altra.
+function erroreOrari(o) {
+  const ORA_MIN = "19:00";
+  const ORA_MAX = "23:00";
+  if (!o || typeof o !== "object") return "Orari mancanti.";
+
+  const campi = {
+    promemoria: "Promemoria a Francesco",
+    avviso_genitori: "Avviso ai genitori",
+    fine_solleciti: "Solleciti fino alle"
+  };
+  for (const [campo, nome] of Object.entries(campi)) {
+    const v = o[campo];
+    if (typeof v !== "string" || !/^([01]\d|2[0-3]):[0-5]\d$/.test(v)) {
+      return `${nome}: orario mancante o non valido.`;
+    }
+    if (v < ORA_MIN || v > ORA_MAX) {
+      return `${nome}: deve essere tra le ${ORA_MIN} e le ${ORA_MAX} (hai messo ${v}).`;
+    }
+  }
+  if (!(o.promemoria < o.avviso_genitori)) {
+    return `L'avviso ai genitori (${o.avviso_genitori}) deve essere dopo il promemoria (${o.promemoria}).`;
+  }
+  if (!(o.avviso_genitori <= o.fine_solleciti)) {
+    return `I solleciti (fino alle ${o.fine_solleciti}) non possono finire prima dell'avviso ai genitori (${o.avviso_genitori}).`;
+  }
+  const n = o.intervallo_solleciti_min;
+  if (!Number.isInteger(n) || n < 5 || n > 30) {
+    return "Solleciti ogni: deve essere un numero intero di minuti tra 5 e 30.";
+  }
+  if (typeof o.avvisa_genitori_se_pronto !== "boolean") {
+    return "Opzione \"Avvisami quando lo zaino è pronto\" non valida.";
+  }
+  return null;
 }
 
 async function leggiCorpo(request) {
@@ -171,7 +199,8 @@ async function gestisciOrari(request, env, ruolo) {
   if (request.method === "POST") {
     if (ruolo !== "genitore") return rispostaJson({ errore: "solo genitori" }, 403);
     const corpo = await leggiCorpo(request);
-    if (!orariValidi(corpo)) return rispostaJson({ errore: "orari non validi" }, 400);
+    const errore = erroreOrari(corpo);
+    if (errore) return rispostaJson({ errore }, 400); // il messaggio arriva fino alla pagina
     // Salvo solo i campi noti, nient'altro.
     const orari = {
       promemoria: corpo.promemoria,

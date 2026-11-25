@@ -76,6 +76,48 @@ function vociMancanti(lista, spuntati) {
     .map(o => ({ materia: g.materia, nome: o.nome })));
 }
 
+// Controlla gli orari e restituisce null se vanno bene, altrimenti il messaggio
+// della PRIMA regola non rispettata. Regole:
+//   - tutti gli orari tra le 19:00 e le 23:00 (estremi compresi);
+//   - promemoria < avviso genitori <= fine solleciti;
+//   - intervallo solleciti: intero tra 5 e 30 minuti.
+// Le ore "HH:MM" si confrontano bene anche come stringhe ("21:00" < "22:00").
+// ATTENZIONE: copia identica in worker/worker.js (erroreOrari): se cambi una, cambia l'altra.
+function erroreOrari(o) {
+  const ORA_MIN = "19:00";
+  const ORA_MAX = "23:00";
+  if (!o || typeof o !== "object") return "Orari mancanti.";
+
+  const campi = {
+    promemoria: "Promemoria a Francesco",
+    avviso_genitori: "Avviso ai genitori",
+    fine_solleciti: "Solleciti fino alle"
+  };
+  for (const [campo, nome] of Object.entries(campi)) {
+    const v = o[campo];
+    if (typeof v !== "string" || !/^([01]\d|2[0-3]):[0-5]\d$/.test(v)) {
+      return `${nome}: orario mancante o non valido.`;
+    }
+    if (v < ORA_MIN || v > ORA_MAX) {
+      return `${nome}: deve essere tra le ${ORA_MIN} e le ${ORA_MAX} (hai messo ${v}).`;
+    }
+  }
+  if (!(o.promemoria < o.avviso_genitori)) {
+    return `L'avviso ai genitori (${o.avviso_genitori}) deve essere dopo il promemoria (${o.promemoria}).`;
+  }
+  if (!(o.avviso_genitori <= o.fine_solleciti)) {
+    return `I solleciti (fino alle ${o.fine_solleciti}) non possono finire prima dell'avviso ai genitori (${o.avviso_genitori}).`;
+  }
+  const n = o.intervallo_solleciti_min;
+  if (!Number.isInteger(n) || n < 5 || n > 30) {
+    return "Solleciti ogni: deve essere un numero intero di minuti tra 5 e 30.";
+  }
+  if (typeof o.avvisa_genitori_se_pronto !== "boolean") {
+    return "Opzione \"Avvisami quando lo zaino è pronto\" non valida.";
+  }
+  return null;
+}
+
 // ---------- Codice di accesso (resta salvato su ogni telefono) ----------
 // La chiave "codice-famiglia" resta la stessa della Fase 1: i telefoni già
 // configurati continuano a funzionare se CODICE_FAMIGLIA = vecchio CODICE.
@@ -100,7 +142,9 @@ function salvaCodice(codice) {
 // ---------- Chiamate al Worker ----------
 
 // Chiamata generica: percorso es. "/stato?data=2026-11-26".
-// Errori: "codice" (401, codice non valido), "permesso" (403, serve il genitore).
+// Errori: "codice" (401, codice non valido), "permesso" (403, serve il genitore);
+// per gli altri errori il messaggio è quello spiegato dal Worker nel campo "errore"
+// (es. quale regola degli orari non è rispettata), se c'è.
 async function chiamaApi(metodo, percorso, corpo) {
   const risposta = await fetch(`${API_URL}${percorso}`, {
     method: metodo,
@@ -109,7 +153,16 @@ async function chiamaApi(metodo, percorso, corpo) {
   });
   if (risposta.status === 401) throw new Error("codice");
   if (risposta.status === 403) throw new Error("permesso");
-  if (!risposta.ok) throw new Error(`Errore del server (${risposta.status})`);
+  if (!risposta.ok) {
+    let messaggio = `Errore del server (${risposta.status})`;
+    try {
+      const dati = await risposta.json();
+      if (dati.errore) messaggio = dati.errore;
+    } catch {
+      // risposta non in JSON: resta il messaggio generico
+    }
+    throw new Error(messaggio);
+  }
   return risposta.json();
 }
 
@@ -313,22 +366,36 @@ function htmlStatoGenitore(config, domani, stato) {
   return html;
 }
 
+// Modulo degli orari. "novalidate" spegne i controlli del browser (messaggi
+// generici e diversi tra iPhone e Android): controlla tutto erroreOrari, che
+// spiega quale regola non è rispettata. L'esito compare dentro il riquadro.
+// I campi sono nell'ordine in cui avvengono: promemoria, avviso, fine solleciti.
 function htmlOrari(orari) {
   return `<h2>Orari notifiche</h2>
-    <form id="form-orari">
+    <form id="form-orari" novalidate>
+      <p class="nota">Tutti gli orari tra le 19:00 e le 23:00.</p>
       <label class="campo">Promemoria a Francesco
-        <input type="time" name="promemoria" value="${orari.promemoria}" required></label>
-      <label class="campo">Solleciti ogni (minuti)
-        <input type="number" name="intervallo_solleciti_min" min="5" max="60"
-               value="${orari.intervallo_solleciti_min}" required></label>
-      <label class="campo">Solleciti fino alle
-        <input type="time" name="fine_solleciti" value="${orari.fine_solleciti}" required></label>
+        <input type="time" name="promemoria" value="${orari.promemoria}"></label>
       <label class="campo">Avviso ai genitori alle
-        <input type="time" name="avviso_genitori" value="${orari.avviso_genitori}" required></label>
+        <input type="time" name="avviso_genitori" value="${orari.avviso_genitori}"></label>
+      <label class="campo">Solleciti fino alle
+        <input type="time" name="fine_solleciti" value="${orari.fine_solleciti}"></label>
+      <label class="campo">Solleciti ogni (minuti)
+        <input type="number" name="intervallo_solleciti_min" min="5" max="30" step="1"
+               inputmode="numeric" value="${orari.intervallo_solleciti_min}"></label>
       <label><input type="checkbox" name="avvisa_genitori_se_pronto"
         ${orari.avvisa_genitori_se_pronto ? "checked" : ""}> Avvisami quando lo zaino è pronto</label>
+      <p id="esito-orari" hidden></p>
       <button type="submit">Salva orari</button>
     </form>`;
+}
+
+// Mostra l'esito del salvataggio orari dentro il riquadro (ok = verde, altrimenti rosso).
+function mostraEsitoOrari(testo, ok) {
+  const el = document.getElementById("esito-orari");
+  el.textContent = testo;
+  el.className = ok ? "pronto" : "errore";
+  el.hidden = false;
 }
 
 function disegnaGenitore(config, domani, stato, orari) {
@@ -365,27 +432,37 @@ function collegaEventiGenitore(config, domani, stato, orari) {
   const ripristina = document.getElementById("ripristina");
   if (ripristina) ripristina.addEventListener("click", () => cambiaSerata(false));
 
+  // Salvataggio orari: controllo prima nella pagina (risposta immediata),
+  // poi il Worker ricontrolla con la stessa regola e potrebbe comunque rifiutare.
   document.getElementById("form-orari").addEventListener("submit", async ev => {
     ev.preventDefault();
     const f = ev.target.elements;
+    const testoIntervallo = f.intervallo_solleciti_min.value.trim();
     const nuovi = {
       promemoria: f.promemoria.value,
-      intervallo_solleciti_min: Number(f.intervallo_solleciti_min.value),
-      fine_solleciti: f.fine_solleciti.value,
       avviso_genitori: f.avviso_genitori.value,
+      fine_solleciti: f.fine_solleciti.value,
+      // Campo vuoto -> NaN, così erroreOrari lo segnala (Number("") darebbe 0).
+      intervallo_solleciti_min: testoIntervallo === "" ? NaN : Number(testoIntervallo),
       avvisa_genitori_se_pronto: f.avvisa_genitori_se_pronto.checked
     };
-    if (nuovi.promemoria >= nuovi.fine_solleciti) {
-      mostraErrore("Il promemoria deve essere prima della fine dei solleciti.");
+
+    const errore = erroreOrari(nuovi);
+    if (errore) {
+      mostraEsitoOrari(errore, false);
       return;
     }
     try {
       const salvati = await salvaOrari(nuovi);
       nascondiErrore();
       disegnaGenitore(config, domani, stato, salvati);
-      alert("Orari salvati ✅");
+      mostraEsitoOrari("Orari salvati ✅", true);
     } catch (e) {
-      mostraErrore("Orari non salvati: controlla i valori e la connessione.");
+      // e.message: regola violata spiegata dal Worker, oppure errore di rete.
+      const testo = e.message === "Failed to fetch" || e.message === "Load failed"
+        ? "Orari non salvati: controlla la connessione."
+        : `Orari non salvati: ${e.message}`;
+      mostraEsitoOrari(testo, false);
     }
   });
 
