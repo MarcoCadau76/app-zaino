@@ -1,0 +1,13 @@
+# Configurazione del Worker "zaino" (gestito con wrangler, dalla cartella worker/)
+name = "zaino"
+main = "worker.js"
+compatibility_date = "2026-11-01"
+
+# Archivio KV con lo stato delle serate. L'id si legge con:
+#   npx wrangler kv namespace list
+[[kv_namespaces]]
+binding = "ZAINO"
+id = "dca758371f8d4cb089c95471994c6e9d"   # KV "zaino-stato"
+
+# I segreti (CODICE) NON stanno qui: si impostano con
+#   npx wrangler secret put CODICE

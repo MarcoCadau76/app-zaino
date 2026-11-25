@@ -1,4 +1,7 @@
-// ===== App Zaino — passo 1: lista di domani (senza notifiche) =====
+// ===== App Zaino — passo 2: stato condiviso sul Worker =====
+
+// Indirizzo del Worker Cloudflare (pubblicato con wrangler dalla cartella worker/).
+const API_URL = "https://zaino.zaino-worker.workers.dev";
 
 const NOMI_GIORNI = ["domenica", "lunedi", "martedi", "mercoledi", "giovedi", "venerdi", "sabato"];
 
@@ -13,7 +16,7 @@ function formattaData(d) {
   return `${a}-${m}-${g}`;
 }
 
-// Per i test: index.html?oggi=2026-12-22 fa finta che oggi sia il 22 dicembre.
+// Per i test: ?oggi=2026-12-22 fa finta che oggi sia il 22 dicembre.
 function leggiOggi() {
   const param = new URLSearchParams(location.search).get("oggi");
   if (param) {
@@ -30,8 +33,6 @@ function giornoDopo(d) {
 }
 
 // Restituisce il motivo per cui non c'è scuola, oppure null se c'è scuola.
-// Le date "AAAA-MM-GG" si possono confrontare come stringhe: l'ordine
-// alfabetico coincide con quello cronologico.
 function motivoNoScuola(data, config) {
   const iso = formattaData(data);
   const { inizio, fine } = config.anno_scolastico;
@@ -43,14 +44,11 @@ function motivoNoScuola(data, config) {
   return null;
 }
 
-// Un oggetto può essere scritto come "Libro" oppure come
-// { "nome": "Tastiera", "facoltativo": true }: qui li rendo tutti uguali.
 function normalizzaOggetto(o) {
   if (typeof o === "string") return { nome: o, facoltativo: false };
   return { nome: o.nome, facoltativo: Boolean(o.facoltativo) };
 }
 
-// Costruisce la lista: [{ materia, oggetti: [{ id, nome, facoltativo }] }]
 function costruisciLista(data, config) {
   const giorno = NOMI_GIORNI[data.getDay()];
   const materie = config.orario[giorno] || [];
@@ -65,37 +63,81 @@ function costruisciLista(data, config) {
   }));
 }
 
-// Pronto = tutti gli oggetti NON facoltativi sono spuntati.
 function contaObbligatori(lista, spuntati) {
   const obbligatori = lista.flatMap(g => g.oggetti).filter(o => !o.facoltativo);
   const fatti = obbligatori.filter(o => spuntati.includes(o.id));
   return { fatti: fatti.length, totale: obbligatori.length };
 }
 
-// ---------- Stato (per ora nel browser; poi passerà al server) ----------
+// ---------- Codice famiglia (resta salvato su ogni telefono) ----------
 
-function chiaveStato(data) {
-  return `zaino-${formattaData(data)}`;
-}
-
-function caricaStato(data) {
+function leggiCodice() {
   try {
-    const salvato = localStorage.getItem(chiaveStato(data));
-    return salvato ? JSON.parse(salvato) : { spuntati: [], chiuso: false };
+    return localStorage.getItem("codice-famiglia");
   } catch {
-    return { spuntati: [], chiuso: false };
+    return null;
   }
 }
 
-function salvaStato(data, stato) {
+function salvaCodice(codice) {
   try {
-    localStorage.setItem(chiaveStato(data), JSON.stringify(stato));
+    if (codice) localStorage.setItem("codice-famiglia", codice);
+    else localStorage.removeItem("codice-famiglia");
   } catch {
-    // storage non disponibile: lo stato resta solo in memoria
+    // storage non disponibile
+  }
+}
+
+// ---------- Stato: ora vive sul Worker, condiviso tra i telefoni ----------
+
+async function chiamaApi(metodo, data, corpo) {
+  const risposta = await fetch(`${API_URL}/stato?data=${formattaData(data)}`, {
+    method: metodo,
+    headers: { "Content-Type": "application/json", "X-Codice": leggiCodice() || "" },
+    body: corpo ? JSON.stringify(corpo) : undefined
+  });
+  if (risposta.status === 401) throw new Error("codice");
+  if (!risposta.ok) throw new Error(`Errore del server (${risposta.status})`);
+  return risposta.json();
+}
+
+async function caricaStato(data) {
+  const s = await chiamaApi("GET", data);
+  return { spuntati: s.spuntati, chiuso: s.chiuso };
+}
+
+async function salvaStato(data, stato) {
+  try {
+    await chiamaApi("POST", data, stato);
+  } catch (e) {
+    mostraErrore("Salvataggio non riuscito: controlla la connessione e riprova.");
   }
 }
 
 // ---------- Disegno della pagina ----------
+
+function mostraErrore(messaggio) {
+  let el = document.getElementById("errore");
+  if (!el) {
+    el = document.createElement("p");
+    el.id = "errore";
+    el.className = "errore";
+    document.getElementById("app").prepend(el);
+  }
+  el.textContent = messaggio;
+}
+
+function chiediCodice(messaggio) {
+  const app = document.getElementById("app");
+  app.innerHTML = `<h1>Codice famiglia</h1>
+    <p>${messaggio}</p>
+    <input id="codice" type="password" autocomplete="off">
+    <button id="entra">Entra</button>`;
+  document.getElementById("entra").addEventListener("click", () => {
+    salvaCodice(document.getElementById("codice").value.trim());
+    avvia();
+  });
+}
 
 function disegna(config, domani, stato) {
   const app = document.getElementById("app");
@@ -136,30 +178,34 @@ function disegna(config, domani, stato) {
   collegaEventi(config, domani, stato);
 }
 
+// Ogni modifica: aggiorno subito la pagina, poi salvo sul server.
+// Così l'app resta reattiva anche se la rete è lenta.
 function collegaEventi(config, domani, stato) {
+  const aggiorna = () => {
+    disegna(config, domani, stato);
+    salvaStato(domani, stato);
+  };
+
   document.querySelectorAll("input[type=checkbox]").forEach(cb => {
     cb.addEventListener("change", () => {
       const id = cb.dataset.id;
       stato.spuntati = cb.checked
         ? [...stato.spuntati, id]
         : stato.spuntati.filter(x => x !== id);
-      salvaStato(domani, stato);
-      disegna(config, domani, stato);
+      aggiorna();
     });
   });
 
   const chiudi = document.getElementById("chiudi");
   if (chiudi) chiudi.addEventListener("click", () => {
     stato.chiuso = true;
-    salvaStato(domani, stato);
-    disegna(config, domani, stato);
+    aggiorna();
   });
 
   const riapri = document.getElementById("riapri");
   if (riapri) riapri.addEventListener("click", () => {
     stato.chiuso = false;
-    salvaStato(domani, stato);
-    disegna(config, domani, stato);
+    aggiorna();
   });
 }
 
@@ -169,7 +215,29 @@ async function avvia() {
   const risposta = await fetch("config.json");
   const config = await risposta.json();
   const domani = giornoDopo(leggiOggi());
-  disegna(config, domani, caricaStato(domani));
+
+  if (motivoNoScuola(domani, config)) {
+    disegna(config, domani, { spuntati: [], chiuso: false });
+    return;
+  }
+
+  if (!leggiCodice()) {
+    chiediCodice("Inserisci il codice famiglia per iniziare.");
+    return;
+  }
+
+  try {
+    const stato = await caricaStato(domani);
+    disegna(config, domani, stato);
+  } catch (e) {
+    if (e.message === "codice") {
+      salvaCodice(null);
+      chiediCodice("Codice errato, riprova.");
+    } else {
+      document.getElementById("app").innerHTML =
+        `<p class="errore">Impossibile caricare la lista: controlla la connessione.</p>`;
+    }
+  }
 }
 
 if (typeof document !== "undefined") avvia();
