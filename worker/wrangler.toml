@@ -17,6 +17,6 @@ id = "dca758371f8d4cb089c95471994c6e9d"   # KV "zaino-stato"
 [vars]
 # Chiave pubblica VAPID generata con: node strumenti/genera-vapid.mjs
 # (la privata va SOLO in: npx wrangler secret put VAPID_PRIVATE)
-VAPID_PUBLIC = "DA_COMPILARE"
+VAPID_PUBLIC = "BNmPyxMKCluC8MJsA-X9Nu4r7FMCJyNVlnFQn1aZUJmknG9jWHBLOBLkxTnpM5XC9gYAFfIoN-kLIhwMOXZvIQE"
 # Contatto richiesto da Apple/Google nella firma VAPID (URL o mailto:).
 VAPID_SUBJECT = "https://marcocadau76.github.io/app-zaino/"
