@@ -15,7 +15,7 @@ const { publicKey, privateKey } = await crypto.subtle.generateKey(
 const pubblica = inBase64Url(new Uint8Array(await crypto.subtle.exportKey("raw", publicKey)));
 const privata = (await crypto.subtle.exportKey("jwk", privateKey)).d; // già in base64url
 
-console.log("\nCHIAVE PUBBLICA (mandala a Claude / mettila in wrangler.toml):");
+console.log("\nCHIAVE PUBBLICA (va in wrangler.toml, VAPID_PUBLIC):");
 console.log(pubblica);
 console.log("\nCHIAVE PRIVATA (incollala solo in 'npx wrangler secret put VAPID_PRIVATE'):");
 console.log(privata);

@@ -16,12 +16,10 @@ const sessione = { ruolo: null, vapid: null, notifiche: "non-supportate", errore
 // ---------- Funzioni di supporto (le altre funzioni pure sono in logica.js) ----------
 
 // Per i test: ?oggi=2026-12-22 fa finta che oggi sia il 22 dicembre.
+// Senza parametro (o con un valore non valido) usa la data vera del telefono.
 function leggiOggi() {
   const param = new URLSearchParams(location.search).get("oggi");
-  if (param) {
-    const [a, m, g] = param.split("-").map(Number);
-    return new Date(a, m - 1, g);
-  }
+  if (param && /^\d{4}-\d{2}-\d{2}$/.test(param)) return dataDaTesto(param);
   return new Date();
 }
 
@@ -199,14 +197,27 @@ function eIos() {
   return /iPhone|iPad|iPod/.test(ua) || (ua.includes("Macintosh") && navigator.maxTouchPoints > 1);
 }
 
-// Suggerimento mostrato solo se l'app è aperta nel browser e non installata.
+// Suggerimento mostrato solo se l'app è aperta nel browser e non installata,
+// con i menu del browser in uso. Su Samsung Internet conviene attivare le notifiche
+// QUI, nella scheda, prima di installare: nell'app installata la richiesta
+// del permesso può non comparire (il permesso poi vale anche per l'app).
 function htmlSuggerimentoInstallazione() {
   if (eInstallata()) return "";
-  const istruzioni = eIos()
-    ? "In Safari tocca <b>Condividi</b> (il quadrato con la freccia) → <b>Aggiungi alla schermata Home</b>."
-    : "Nel menu di Chrome (⋮) tocca <b>Installa app</b> oppure <b>Aggiungi a schermata Home</b>.";
+  let istruzioni;
+  switch (browserInUso()) {
+    case "ios":
+      istruzioni = "In Safari tocca <b>Condividi</b> (il quadrato con la freccia) → <b>Aggiungi alla schermata Home</b>. "
+        + "Su iPhone le notifiche funzionano solo dall'app installata.";
+      break;
+    case "samsung":
+      istruzioni = "Prima tocca qui sotto <b>Attiva notifiche</b> e scegli <b>Consenti</b>; "
+        + "poi menu <b>≡</b> → <b>Aggiungi pagina a</b> → <b>Schermata Home</b>.";
+      break;
+    default:
+      istruzioni = "Nel menu del browser (⋮) tocca <b>Installa app</b> oppure <b>Aggiungi a schermata Home</b>.";
+  }
   return `<p class="installa">📲 Installa l'app per ricevere i promemoria. ${istruzioni}
-    Dopo l'installazione aprila dall'icona e reinserisci il codice.</p>`;
+    Dopo l'installazione aprila dall'icona e, se lo chiede, reinserisci il codice.</p>`;
 }
 
 // ---------- Notifiche push (Fase 4) ----------
@@ -279,11 +290,6 @@ function istruzioniPermesso() {
     default:
       return "Consenti le notifiche per marcocadau76.github.io nelle impostazioni del browser, poi riapri l'app.";
   }
-}
-
-// Messaggio per il permesso negato (usato nella schermata e dopo il tocco).
-function istruzioniPermessoNegato() {
-  return istruzioniPermesso();
 }
 
 // Stato delle notifiche su questo telefono:
@@ -360,7 +366,7 @@ async function attivaNotifiche(passo) {
   }
   if (permesso === "denied") {
     sessione.notifiche = "negate";
-    throw new Error(`Permesso negato. ${istruzioniPermessoNegato()}`);
+    throw new Error(`Permesso negato. ${istruzioniPermesso()}`);
   }
   if (permesso !== "granted") {
     throw new Error("Hai chiuso la richiesta senza scegliere: tocca di nuovo il tasto e scegli \"Consenti\".");
@@ -411,7 +417,7 @@ function htmlNotifiche() {
       return `<button id="attiva-notifiche">🔔 Attiva notifiche</button>
         <p id="esito-notifiche" hidden></p>`;
     case "negate":
-      return `<p class="nota">🔕 Notifiche bloccate. ${istruzioniPermessoNegato()}</p>`;
+      return `<p class="nota">🔕 Notifiche bloccate. ${istruzioniPermesso()}</p>`;
     case "da-installare":
       return ""; // ci pensa il suggerimento di installazione
     case "errore":
