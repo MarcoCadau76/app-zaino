@@ -342,12 +342,39 @@ function testoErrore(e) {
   return e.message || String(e);
 }
 
-// Istruzioni per riattivare un permesso negato, diverse per iPhone e Android.
+// Browser usato: "ios", "samsung" (Samsung Internet), "chrome" o "altro".
+// Serve solo a dare istruzioni con i menu giusti.
+function browserInUso() {
+  const ua = navigator.userAgent;
+  if (eIos()) return "ios";
+  if (/SamsungBrowser/.test(ua)) return "samsung";
+  if (/Chrome/.test(ua)) return "chrome";
+  return "altro";
+}
+
+// Dove si concede (o si riattiva) il permesso delle notifiche per il sito,
+// con i menu del browser in uso. Il permesso vale per il sito, quindi anche
+// per l'app installata.
+function istruzioniPermesso() {
+  switch (browserInUso()) {
+    case "ios":
+      return "Apri Impostazioni → Notifiche → Zaino e attiva \"Consenti notifiche\", poi riapri l'app.";
+    case "samsung":
+      return "Apri Samsung Internet → menu ≡ → Impostazioni → Siti e download → Notifiche: "
+        + "attiva le richieste di notifica e imposta marcocadau76.github.io su \"Consenti\". "
+        + "Controlla anche Impostazioni di Android → App → Samsung Internet → Notifiche. Poi riapri l'app.";
+    case "chrome":
+      return "Apri Chrome → ⋮ → Impostazioni → Impostazioni sito → Tutti i siti → marcocadau76.github.io "
+        + "→ Notifiche → Consenti (e disattiva \"Usa messaggi più discreti\" in Impostazioni sito → Notifiche). "
+        + "Poi riapri l'app.";
+    default:
+      return "Consenti le notifiche per marcocadau76.github.io nelle impostazioni del browser, poi riapri l'app.";
+  }
+}
+
+// Messaggio per il permesso negato (usato nella schermata e dopo il tocco).
 function istruzioniPermessoNegato() {
-  return eIos()
-    ? "Riattivale da Impostazioni → Notifiche → Zaino, poi riapri l'app."
-    : "Riattivale da Impostazioni del telefono → App → Zaino → Notifiche "
-      + "(oppure tieni premuta l'icona Zaino → Info app → Notifiche), poi riapri l'app.";
+  return istruzioniPermesso();
 }
 
 // Stato delle notifiche su questo telefono:
@@ -410,17 +437,13 @@ async function attivaNotifiche(passo) {
       permesso = await conTimeout(Notification.requestPermission(), 30000, "timeout-permesso");
     } catch (e) {
       if (e.message === "timeout-permesso") {
-        // Caso tipico di Chrome su Android: richiesta "silenziosa" (campanella nella
-        // barra dell'indirizzo), invisibile nell'app installata che la barra non ce l'ha.
+        // Caso tipico su Android (Chrome, Samsung Internet): richiesta "silenziosa"
+        // o bloccata dalle impostazioni del browser, invisibile nell'app installata.
+        // Il permesso si concede dalle impostazioni del browser e vale anche per l'app.
         throw new Error(
           `Il telefono non ha mostrato la richiesta di permesso entro 30 secondi `
-          + `(stato del permesso: "${Notification.permission}"). `
-          + (eIos()
-            ? "Controlla Impostazioni → Notifiche → Zaino, poi riapri l'app."
-            : "Chrome probabilmente l'ha nascosta. Apri l'indirizzo dell'app in una scheda "
-              + "normale di Chrome, tocca \"Attiva notifiche\", poi la campanella o il lucchetto "
-              + "nella barra dell'indirizzo → Notifiche → Consenti. Poi riapri l'app dall'icona "
-              + "e tocca di nuovo \"Attiva notifiche\".")
+          + `(stato del permesso: "${Notification.permission}"). ${istruzioniPermesso()} `
+          + `Poi tocca di nuovo "Attiva notifiche".`
         );
       }
       throw new Error(`Richiesta del permesso non riuscita: ${testoErrore(e)}`);
