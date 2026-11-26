@@ -399,17 +399,32 @@ async function leggiStatoNotifiche() {
 // La richiesta del permesso deve essere la PRIMA cosa fatta dopo il tocco:
 // iOS la blocca se prima ci sono attese.
 async function attivaNotifiche(passo) {
-  // 1. Permesso.
-  passo("1/3 Richiesta del permesso…");
-  let permesso;
-  try {
-    permesso = await conTimeout(Notification.requestPermission(), 30000, "timeout-permesso");
-  } catch (e) {
-    if (e.message === "timeout-permesso") {
-      throw new Error("Il telefono non ha mostrato la richiesta di permesso entro 30 secondi "
-        + "(Chrome a volte la nasconde). " + istruzioniPermessoNegato().replace("Riattivale", "Attivale"));
+  // 1. Permesso. Se è già concesso (es. dato da una scheda di Chrome) non lo
+  //    richiedo: su Android la richiesta potrebbe restare appesa senza motivo.
+  let permesso = Notification.permission;
+  if (permesso === "granted") {
+    passo("1/3 Permesso già concesso ✅");
+  } else {
+    passo("1/3 Richiesta del permesso…");
+    try {
+      permesso = await conTimeout(Notification.requestPermission(), 30000, "timeout-permesso");
+    } catch (e) {
+      if (e.message === "timeout-permesso") {
+        // Caso tipico di Chrome su Android: richiesta "silenziosa" (campanella nella
+        // barra dell'indirizzo), invisibile nell'app installata che la barra non ce l'ha.
+        throw new Error(
+          `Il telefono non ha mostrato la richiesta di permesso entro 30 secondi `
+          + `(stato del permesso: "${Notification.permission}"). `
+          + (eIos()
+            ? "Controlla Impostazioni → Notifiche → Zaino, poi riapri l'app."
+            : "Chrome probabilmente l'ha nascosta. Apri l'indirizzo dell'app in una scheda "
+              + "normale di Chrome, tocca \"Attiva notifiche\", poi la campanella o il lucchetto "
+              + "nella barra dell'indirizzo → Notifiche → Consenti. Poi riapri l'app dall'icona "
+              + "e tocca di nuovo \"Attiva notifiche\".")
+        );
+      }
+      throw new Error(`Richiesta del permesso non riuscita: ${testoErrore(e)}`);
     }
-    throw new Error(`Richiesta del permesso non riuscita: ${testoErrore(e)}`);
   }
   if (permesso === "denied") {
     sessione.notifiche = "negate";
