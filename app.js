@@ -1,27 +1,19 @@
-// ===== App Zaino — Fase 2: ruoli (Francesco / Genitore), annulla serata, orari =====
+// ===== App Zaino — schermate Francesco / Genitore, notifiche, prova della serata =====
+// Le funzioni pure (lista, conteggi, date, regole degli orari) sono in logica.js,
+// caricato prima di questo file e usato anche dal Worker.
 
 // Indirizzo del Worker Cloudflare (pubblicato con wrangler dalla cartella worker/).
 const API_URL = "https://zaino.zaino-worker.workers.dev";
-
-const NOMI_GIORNI = ["domenica", "lunedi", "martedi", "mercoledi", "giovedi", "venerdi", "sabato"];
 
 // Dati della sessione corrente, condivisi dalle schermate (riempiti da avvia):
 //   ruolo: "francesco" | "genitore"; vapid: chiave pubblica per le notifiche;
 //   notifiche: stato su questo telefono (vedi leggiStatoNotifiche);
 //   dispositivi: telefoni iscritti (solo schermata genitore).
 //   erroreNotifiche: motivo esatto quando notifiche = "errore".
-const sessione = { ruolo: null, vapid: null, notifiche: "non-supportate", erroreNotifiche: "", dispositivi: [] };
+//   prova: prova della serata in corso (solo genitori), oppure null.
+const sessione = { ruolo: null, vapid: null, notifiche: "non-supportate", erroreNotifiche: "", dispositivi: [], prova: null };
 
-// ---------- Funzioni "pure": non toccano la pagina, solo dati ----------
-
-// Data -> "AAAA-MM-GG" usando l'ora LOCALE (toISOString userebbe UTC e
-// tra mezzanotte e l'una darebbe il giorno sbagliato).
-function formattaData(d) {
-  const a = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const g = String(d.getDate()).padStart(2, "0");
-  return `${a}-${m}-${g}`;
-}
+// ---------- Funzioni di supporto (le altre funzioni pure sono in logica.js) ----------
 
 // Per i test: ?oggi=2026-12-22 fa finta che oggi sia il 22 dicembre.
 function leggiOggi() {
@@ -31,98 +23,6 @@ function leggiOggi() {
     return new Date(a, m - 1, g);
   }
   return new Date();
-}
-
-function giornoDopo(d) {
-  const r = new Date(d);
-  r.setDate(r.getDate() + 1); // gestisce da solo fine mese e fine anno
-  return r;
-}
-
-// Restituisce il motivo per cui non c'è scuola, oppure null se c'è scuola.
-function motivoNoScuola(data, config) {
-  const iso = formattaData(data);
-  const { inizio, fine } = config.anno_scolastico;
-  if (iso < inizio || iso > fine) return "Fuori dall'anno scolastico";
-  if (data.getDay() === 0) return "Domenica";
-  for (const c of config.chiusure) {
-    if (iso >= c.dal && iso <= c.al) return c.motivo;
-  }
-  return null;
-}
-
-function normalizzaOggetto(o) {
-  if (typeof o === "string") return { nome: o, facoltativo: false };
-  return { nome: o.nome, facoltativo: Boolean(o.facoltativo) };
-}
-
-function costruisciLista(data, config) {
-  const giorno = NOMI_GIORNI[data.getDay()];
-  const materie = config.orario[giorno] || [];
-  const gruppi = [{ materia: "Ogni giorno", oggetti: config.sempre }, ...materie.map(m => ({
-    materia: m,
-    oggetti: config.materie[m] || []
-  }))];
-
-  return gruppi.map(g => ({
-    materia: g.materia,
-    oggetti: g.oggetti.map(normalizzaOggetto).map(o => ({ ...o, id: `${g.materia}|${o.nome}` }))
-  }));
-}
-
-function contaObbligatori(lista, spuntati) {
-  const obbligatori = lista.flatMap(g => g.oggetti).filter(o => !o.facoltativo);
-  const fatti = obbligatori.filter(o => spuntati.includes(o.id));
-  return { fatti: fatti.length, totale: obbligatori.length };
-}
-
-// Elenco delle voci obbligatorie non ancora spuntate: [{ materia, nome }, ...]
-function vociMancanti(lista, spuntati) {
-  return lista.flatMap(g => g.oggetti
-    .filter(o => !o.facoltativo && !spuntati.includes(o.id))
-    .map(o => ({ materia: g.materia, nome: o.nome })));
-}
-
-// Controlla gli orari e restituisce null se vanno bene, altrimenti il messaggio
-// della PRIMA regola non rispettata. Regole:
-//   - tutti gli orari tra le 19:00 e le 23:00 (estremi compresi);
-//   - promemoria < avviso genitori <= fine solleciti;
-//   - intervallo solleciti: intero tra 5 e 30 minuti.
-// Le ore "HH:MM" si confrontano bene anche come stringhe ("21:00" < "22:00").
-// ATTENZIONE: copia identica in worker/worker.js (erroreOrari): se cambi una, cambia l'altra.
-function erroreOrari(o) {
-  const ORA_MIN = "19:00";
-  const ORA_MAX = "23:00";
-  if (!o || typeof o !== "object") return "Orari mancanti.";
-
-  const campi = {
-    promemoria: "Promemoria a Francesco",
-    avviso_genitori: "Avviso ai genitori",
-    fine_solleciti: "Solleciti fino alle"
-  };
-  for (const [campo, nome] of Object.entries(campi)) {
-    const v = o[campo];
-    if (typeof v !== "string" || !/^([01]\d|2[0-3]):[0-5]\d$/.test(v)) {
-      return `${nome}: orario mancante o non valido.`;
-    }
-    if (v < ORA_MIN || v > ORA_MAX) {
-      return `${nome}: deve essere tra le ${ORA_MIN} e le ${ORA_MAX} (hai messo ${v}).`;
-    }
-  }
-  if (!(o.promemoria < o.avviso_genitori)) {
-    return `L'avviso ai genitori (${o.avviso_genitori}) deve essere dopo il promemoria (${o.promemoria}).`;
-  }
-  if (!(o.avviso_genitori <= o.fine_solleciti)) {
-    return `I solleciti (fino alle ${o.fine_solleciti}) non possono finire prima dell'avviso ai genitori (${o.avviso_genitori}).`;
-  }
-  const n = o.intervallo_solleciti_min;
-  if (!Number.isInteger(n) || n < 5 || n > 30) {
-    return "Solleciti ogni: deve essere un numero intero di minuti tra 5 e 30.";
-  }
-  if (typeof o.avvisa_genitori_se_pronto !== "boolean") {
-    return "Opzione \"Avvisami quando lo zaino è pronto\" non valida.";
-  }
-  return null;
 }
 
 // Chiave base64url (formato delle chiavi push) -> array di byte.
@@ -218,9 +118,11 @@ async function impostaSerata(data, annullata) {
   return chiamaApi("POST", conData("/serata", data), { annullata });
 }
 
+// Orari delle notifiche e, nella stessa risposta, l'eventuale prova della serata
+// in corso: { orari, prova } (prova = null se non c'è).
 async function caricaOrari() {
   const r = await chiamaApi("GET", "/orari");
-  return r.orari;
+  return { orari: r.orari, prova: r.prova || null };
 }
 
 async function salvaOrari(orari) {
@@ -244,6 +146,13 @@ async function caricaDispositivi() {
 async function inviaProva(destinatari) {
   const r = await chiamaApi("POST", "/prova", { destinatari });
   return r.esiti;
+}
+
+// Solo genitori: avvia (attiva = true) o ferma la prova della serata per la lista
+// di `data`. Restituisce la prova con gli orari "HH:MM", oppure null se fermata.
+async function impostaProvaSerata(data, attiva) {
+  const r = await chiamaApi("POST", conData("/prova-serata", data), { attiva });
+  return r.prova;
 }
 
 // ---------- Messaggi d'errore (spazio fisso sopra l'app) ----------
@@ -690,7 +599,8 @@ function mostraEsitoOrari(testo, ok) {
   el.hidden = false;
 }
 
-// Sezione notifiche dei genitori: telefoni iscritti e notifica di prova.
+// Sezione notifiche dei genitori: telefoni iscritti, notifica di prova
+// e prova della sequenza serale.
 function htmlSezioneNotifiche() {
   const nomeRuolo = r => (r === "genitore" ? "genitore" : "Francesco");
   const elenco = sessione.dispositivi.length === 0
@@ -707,7 +617,32 @@ function htmlSezioneNotifiche() {
         <option value="genitore">genitori</option>
       </select></label>
     <button id="prova" class="secondario">Invia notifica di prova</button>
-    <ul id="esiti-prova" class="mancanti" hidden></ul>`;
+    <ul id="esiti-prova" class="mancanti" hidden></ul>
+    ${htmlProvaSerata()}`;
+}
+
+// Prova della sequenza serale: la stessa logica della sera vera (lista di domani,
+// serata annullata, zaino chiuso) ma con gli orari compressi in 10 minuti.
+// Se è in corso mostro gli orari esatti e il tasto per fermarla.
+function htmlProvaSerata() {
+  const p = sessione.prova;
+  const intestazione = `<h2>Prova della serata</h2>`;
+  const esito = `<p id="esito-prova" hidden></p>`;
+  if (p) {
+    return `${intestazione}
+      <p class="nota">Prova in corso per la lista di ${titoloData(dataDaTesto(p.data))}:
+        promemoria alle <b>${p.promemoria}</b>, solleciti ogni ${p.intervallo_solleciti_min} minuti
+        fino alle <b>${p.fine_solleciti}</b>, avviso ai genitori alle <b>${p.avviso_genitori}</b>.
+        Se Francesco chiude lo zaino i solleciti si fermano e arriva "Zaino pronto".</p>
+      <button id="ferma-prova" class="secondario">Ferma la prova</button>
+      ${esito}`;
+  }
+  return `${intestazione}
+    <p class="nota">Fa partire la sequenza vera in 10 minuti: promemoria dopo 1 minuto,
+      solleciti ogni 2 minuti, avviso ai genitori dopo 4. Usa la lista di domani:
+      se lo zaino è già chiuso o la serata è annullata non arriva nulla (come la sera vera).</p>
+    <button id="avvia-prova" class="secondario">Prova la sequenza (10 minuti)</button>
+    ${esito}`;
 }
 
 function disegnaGenitore(config, domani, stato, orari) {
@@ -799,6 +734,26 @@ function collegaEventiGenitore(config, domani, stato, orari) {
     prova.textContent = "Invia notifica di prova";
   });
 
+  // Prova della serata: avvio o arresto; se il Worker rifiuta (es. domani niente
+  // scuola) il motivo compare sotto il tasto.
+  const cambiaProva = async (tasto, attiva) => {
+    tasto.disabled = true;
+    try {
+      sessione.prova = await impostaProvaSerata(domani, attiva);
+      disegnaGenitore(config, domani, stato, orari);
+    } catch (e) {
+      const el = document.getElementById("esito-prova");
+      el.textContent = `Prova non avviata: ${e.message}`;
+      el.className = "errore";
+      el.hidden = false;
+      tasto.disabled = false;
+    }
+  };
+  const avviaProva = document.getElementById("avvia-prova");
+  if (avviaProva) avviaProva.addEventListener("click", () => cambiaProva(avviaProva, true));
+  const fermaProva = document.getElementById("ferma-prova");
+  if (fermaProva) fermaProva.addEventListener("click", () => cambiaProva(fermaProva, false));
+
   collegaEsci();
 }
 
@@ -829,10 +784,11 @@ async function avvia() {
     sessione.notifiche = await leggiStatoNotifiche();
 
     if (ruolo === "genitore") {
-      const [stato, orari, dispositivi] = await Promise.all([
+      const [stato, { orari, prova }, dispositivi] = await Promise.all([
         caricaStato(domani), caricaOrari(), caricaDispositivi()
       ]);
       sessione.dispositivi = dispositivi;
+      sessione.prova = prova;
       disegnaGenitore(config, domani, stato, orari);
     } else if (motivoNoScuola(domani, config)) {
       // Francesco, giorno senza scuola: non serve chiedere lo stato al server.

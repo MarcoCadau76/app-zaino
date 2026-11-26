@@ -44,6 +44,8 @@
 <body>
   <p id="errore" class="errore" hidden></p>
   <div id="app">Caricamento…</div>
+  <!-- logica.js (funzioni pure, condivise con il Worker) deve venire prima di app.js -->
+  <script src="logica.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

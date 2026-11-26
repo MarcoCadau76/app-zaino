@@ -1,18 +1,30 @@
-// ===== Worker App Zaino — Fase 4: ruoli, serata, orari, notifiche push =====
+// ===== Worker App Zaino — Fase 5: ruoli, serata, orari, notifiche push, cron serale =====
 // API (ogni richiesta deve avere l'intestazione X-Codice):
 //   GET    /sessione                   -> { ruolo, vapid }  (vapid = chiave pubblica per iscriversi)
 //   GET    /stato?data=AAAA-MM-GG      -> { spuntati, chiuso, annullata }
 //   POST   /stato?data=AAAA-MM-GG      corpo { spuntati, chiuso }                  (tutti)
 //   POST   /serata?data=AAAA-MM-GG     corpo { annullata: bool }                   (solo genitori)
-//   GET    /orari                      -> { orari, personalizzati }                (tutti)
+//   GET    /orari                      -> { orari, personalizzati, prova }         (tutti)
 //   POST   /orari                      corpo { promemoria, ... }                   (solo genitori)
 //   POST   /iscrizione                 corpo { iscrizione, dispositivo }           (tutti)
 //   DELETE /iscrizione                 corpo { endpoint }                          (tutti)
 //   GET    /iscrizioni                 -> { dispositivi: [...] }                   (solo genitori)
 //   POST   /prova                      corpo { destinatari: tutti|francesco|genitore } (solo genitori)
+//   POST   /prova-serata?data=...      corpo { attiva: bool }  sequenza compressa  (solo genitori)
 // Il ruolo si deduce dal codice: CODICE_GENITORI -> genitore, CODICE_FAMIGLIA -> francesco.
+//
+// Cron (ogni minuto, vedi wrangler.toml): calcola l'ora italiana e, se è il minuto
+// giusto, manda promemoria / solleciti a Francesco e avviso ai genitori.
+// Il cron NON scrive mai nel KV: tutto si ricalcola dall'orologio (vedi serata.js).
 
 import { inviaPush, base64UrlInBytes } from "./push.js";
+import logica from "../logica.js";
+import {
+  INIZIO_FINESTRA, FINE_FINESTRA, PIANO_PROVA, DURATA_PROVA_MIN, DESTINATARI,
+  oraRoma, domaniDi, pianoDaOrari, eventiSerata, orariProva, riepilogo, messaggioEvento
+} from "./serata.js";
+
+const { dataDaTesto, motivoNoScuola, erroreOrari } = logica;
 
 const ORIGINE_PERMESSA = "https://marcocadau76.github.io";
 const CONFIG_URL = "https://marcocadau76.github.io/app-zaino/config.json";
@@ -20,6 +32,9 @@ const TTL_SERATA = 60 * 60 * 24 * 14;      // i dati di una sera si cancellano d
 const DURATA_CACHE_CONFIG = 5 * 60 * 1000; // config.json riletto al massimo ogni 5 minuti
 const RE_DATA = /^\d{4}-\d{2}-\d{2}$/;
 const MAX_ISCRIZIONI = 20;                 // limite di sicurezza: l'elenco non cresce all'infinito
+const CHIAVE_PROVA = "prova_serata";       // { data, inizio } della prova in corso (scade da sola)
+const TTL_FRANCESCO = 15 * 60;             // un sollecito vecchio di 15 minuti non serve più
+const TTL_GENITORI = 60 * 60;
 
 // Servizi push ammessi: il Worker spedisce solo a questi indirizzi.
 const HOST_PUSH = ["web.push.apple.com", "fcm.googleapis.com", "updates.push.services.mozilla.com", "notify.windows.com"];
@@ -96,55 +111,22 @@ function orariDaConfig(config) {
   };
 }
 
+// Orari in uso: quelli salvati dai genitori nel KV, altrimenti quelli di config.json.
+// Usata dall'API /orari, dal cron e dall'avviso "Zaino pronto".
+async function leggiOrari(env) {
+  const salvati = await env.ZAINO.get("orari", "json");
+  if (salvati) return { orari: salvati, personalizzati: true };
+  return { orari: orariDaConfig(await leggiConfig()), personalizzati: false };
+}
+
 // ---------- Validazione dei corpi JSON ----------
+// (le regole degli orari, erroreOrari, sono in logica.js: stessa copia della pagina)
 
 function statoValido(corpo) {
   return corpo
     && Array.isArray(corpo.spuntati)
     && corpo.spuntati.every(x => typeof x === "string")
     && typeof corpo.chiuso === "boolean";
-}
-
-// Controlla gli orari e restituisce null se vanno bene, altrimenti il messaggio
-// della PRIMA regola non rispettata. Regole:
-//   - tutti gli orari tra le 19:00 e le 23:00 (estremi compresi);
-//   - promemoria < avviso genitori <= fine solleciti;
-//   - intervallo solleciti: intero tra 5 e 30 minuti.
-// Le ore "HH:MM" si confrontano bene anche come stringhe ("21:00" < "22:00").
-// ATTENZIONE: copia identica in app.js (erroreOrari): se cambi una, cambia l'altra.
-function erroreOrari(o) {
-  const ORA_MIN = "19:00";
-  const ORA_MAX = "23:00";
-  if (!o || typeof o !== "object") return "Orari mancanti.";
-
-  const campi = {
-    promemoria: "Promemoria a Francesco",
-    avviso_genitori: "Avviso ai genitori",
-    fine_solleciti: "Solleciti fino alle"
-  };
-  for (const [campo, nome] of Object.entries(campi)) {
-    const v = o[campo];
-    if (typeof v !== "string" || !/^([01]\d|2[0-3]):[0-5]\d$/.test(v)) {
-      return `${nome}: orario mancante o non valido.`;
-    }
-    if (v < ORA_MIN || v > ORA_MAX) {
-      return `${nome}: deve essere tra le ${ORA_MIN} e le ${ORA_MAX} (hai messo ${v}).`;
-    }
-  }
-  if (!(o.promemoria < o.avviso_genitori)) {
-    return `L'avviso ai genitori (${o.avviso_genitori}) deve essere dopo il promemoria (${o.promemoria}).`;
-  }
-  if (!(o.avviso_genitori <= o.fine_solleciti)) {
-    return `I solleciti (fino alle ${o.fine_solleciti}) non possono finire prima dell'avviso ai genitori (${o.avviso_genitori}).`;
-  }
-  const n = o.intervallo_solleciti_min;
-  if (!Number.isInteger(n) || n < 5 || n > 30) {
-    return "Solleciti ogni: deve essere un numero intero di minuti tra 5 e 30.";
-  }
-  if (typeof o.avvisa_genitori_se_pronto !== "boolean") {
-    return "Opzione \"Avvisami quando lo zaino è pronto\" non valida.";
-  }
-  return null;
 }
 
 // true se l'indirizzo è https e appartiene a un servizio push conosciuto.
@@ -206,7 +188,6 @@ function descriviEsito(stato) {
 // ("francesco", "genitore", oppure null = tutti). Le iscrizioni scadute
 // (404/410) vengono tolte dal KV: è l'unico caso in cui qui si scrive.
 // Restituisce il resoconto per dispositivo.
-// Usata anche dal cron della Fase 5.
 async function inviaNotifica(env, ruolo, messaggio, ttl) {
   const lista = await leggiIscrizioni(env);
   const destinatari = lista.filter(i => !ruolo || i.ruolo === ruolo);
@@ -234,9 +215,111 @@ async function inviaNotifica(env, ruolo, messaggio, ttl) {
   }));
 }
 
+// ---------- Prova della serata (sequenza compressa) ----------
+
+// Prova in corso letta dal KV, oppure null. { data, inizio (ms) }
+async function leggiProva(env) {
+  return env.ZAINO.get(CHIAVE_PROVA, "json");
+}
+
+// Prova in forma leggibile per la pagina: data + orari "HH:MM" italiani.
+function descriviProva(prova) {
+  if (!prova) return null;
+  return { data: prova.data, ...orariProva(prova.inizio) };
+}
+
+// ---------- Sequenza serale: controlli comuni e invio ----------
+
+// Manda gli eventi della serata (promemoria, sollecito, avviso) per la lista di `data`,
+// ma solo se domani c'è scuola, la serata non è annullata e lo zaino non è chiuso.
+// `prova` = true aggiunge "(prova)" ai titoli. Scrive nel registro (wrangler tail).
+async function eseguiEventi(env, eventi, data, prova) {
+  const config = await leggiConfig();
+  const motivo = motivoNoScuola(dataDaTesto(data), config);
+  if (motivo) {
+    console.log(`serata ${data}: niente scuola (${motivo}), nessun invio di ${eventi.join("+")}`);
+    return;
+  }
+
+  const [stato, annullata] = await Promise.all([
+    env.ZAINO.get(`stato:${data}`, "json"),
+    env.ZAINO.get(`annullata:${data}`)
+  ]);
+  if (annullata === "1") {
+    console.log(`serata ${data}: annullata dai genitori, nessun invio di ${eventi.join("+")}`);
+    return;
+  }
+  if (stato && stato.chiuso) {
+    console.log(`serata ${data}: zaino già chiuso, nessun invio di ${eventi.join("+")}`);
+    return;
+  }
+
+  const conteggio = riepilogo(data, config, stato ? stato.spuntati : []);
+  // In sequenza (non in parallelo): se un'iscrizione è scaduta, la seconda
+  // spedizione rilegge l'elenco già ripulito invece di sovrascriverlo.
+  for (const evento of eventi) {
+    const ruolo = DESTINATARI[evento];
+    const messaggio = messaggioEvento(evento, data, conteggio, prova);
+    const esiti = await inviaNotifica(env, ruolo, messaggio, ruolo === "francesco" ? TTL_FRANCESCO : TTL_GENITORI);
+    console.log(`serata ${data}${prova ? " (prova)" : ""}: ${evento} a ${ruolo}, mancano ${conteggio.mancanti}/${conteggio.totale} -> `
+      + (esiti.map(e => `${e.dispositivo} ${e.stato}`).join(", ") || "nessun telefono iscritto"));
+  }
+}
+
+// "Zaino pronto ✅" ai genitori, chiamata quando lo zaino passa da aperto a chiuso.
+// Solo se i genitori l'hanno chiesto, se quel giorno c'è scuola e la serata non è annullata.
+async function avvisaPronto(env, data) {
+  try {
+    const [{ orari }, annullata, prova, config] = await Promise.all([
+      leggiOrari(env),
+      env.ZAINO.get(`annullata:${data}`),
+      leggiProva(env),
+      leggiConfig()
+    ]);
+    if (!orari.avvisa_genitori_se_pronto) return;
+    if (annullata === "1") return;
+    if (motivoNoScuola(dataDaTesto(data), config)) return;
+
+    const inProva = Boolean(prova && prova.data === data);
+    const messaggio = messaggioEvento("pronto", data, { mancanti: 0, totale: 0 }, inProva);
+    const esiti = await inviaNotifica(env, "genitore", messaggio, TTL_GENITORI);
+    console.log(`serata ${data}: pronto ai genitori -> ${esiti.map(e => `${e.dispositivo} ${e.stato}`).join(", ") || "nessun telefono"}`);
+  } catch (e) {
+    console.log(`avviso "pronto" non riuscito: ${e}`);
+  }
+}
+
+// Lavoro del cron per il minuto `ms` (ora prevista dello scatto, in UTC).
+// Letture: la chiave della prova ogni minuto; gli orari solo tra le 19:00 e le 23:00;
+// stato e annullamento solo nei minuti in cui c'è davvero qualcosa da mandare.
+async function eseguiCron(env, ms) {
+  const adesso = oraRoma(ms);
+  const nellaFinestra = adesso.minuti >= INIZIO_FINESTRA && adesso.minuti <= FINE_FINESTRA;
+
+  const [prova, orariInUso] = await Promise.all([
+    leggiProva(env),
+    nellaFinestra ? leggiOrari(env) : null
+  ]);
+
+  // Serata vera: lista di domani (rispetto alla data italiana di oggi).
+  if (orariInUso) {
+    const eventi = eventiSerata(adesso.minuti, pianoDaOrari(orariInUso.orari));
+    if (eventi.length > 0) await eseguiEventi(env, eventi, domaniDi(adesso.data), false);
+  }
+
+  // Prova: minuti passati dall'avvio, con il piano compresso.
+  if (prova) {
+    const minutoProva = Math.round((ms - prova.inizio) / 60000);
+    const eventi = eventiSerata(minutoProva, PIANO_PROVA);
+    if (eventi.length > 0) await eseguiEventi(env, eventi, prova.data, true);
+  }
+}
+
 // ---------- Gestori delle singole API ----------
 
-async function gestisciStato(request, env, data) {
+// Stato della lista. Quando lo zaino passa da aperto a chiuso parte (in sottofondo,
+// senza far aspettare l'app) l'avviso "Zaino pronto" ai genitori.
+async function gestisciStato(request, env, ctx, data) {
   const chiave = `stato:${data}`;
 
   if (request.method === "GET") {
@@ -252,8 +335,12 @@ async function gestisciStato(request, env, data) {
   if (request.method === "POST") {
     const corpo = await leggiCorpo(request);
     if (!statoValido(corpo)) return rispostaJson({ errore: "stato non valido" }, 400);
+    const precedente = await env.ZAINO.get(chiave, "json");
     const stato = { spuntati: corpo.spuntati, chiuso: corpo.chiuso, aggiornato: new Date().toISOString() };
     await env.ZAINO.put(chiave, JSON.stringify(stato), { expirationTtl: TTL_SERATA });
+    if (stato.chiuso && !(precedente && precedente.chiuso)) {
+      ctx.waitUntil(avvisaPronto(env, data));
+    }
     return rispostaJson(stato);
   }
 
@@ -277,12 +364,12 @@ async function gestisciSerata(request, env, data, ruolo) {
   return rispostaJson({ annullata: corpo.annullata });
 }
 
+// Orari delle notifiche. La GET restituisce anche l'eventuale prova in corso,
+// così la schermata genitore la mostra senza una chiamata in più.
 async function gestisciOrari(request, env, ruolo) {
   if (request.method === "GET") {
-    const salvati = await env.ZAINO.get("orari", "json");
-    if (salvati) return rispostaJson({ orari: salvati, personalizzati: true });
-    const config = await leggiConfig();
-    return rispostaJson({ orari: orariDaConfig(config), personalizzati: false });
+    const [{ orari, personalizzati }, prova] = await Promise.all([leggiOrari(env), leggiProva(env)]);
+    return rispostaJson({ orari, personalizzati, prova: descriviProva(prova) });
   }
 
   if (request.method === "POST") {
@@ -378,10 +465,34 @@ async function gestisciProva(request, env, ruolo) {
   return rispostaJson({ esiti });
 }
 
+// Avvia o ferma la prova della serata per la lista di `data` (solo genitori).
+// Una sola scrittura nel KV, con scadenza automatica dopo DURATA_PROVA_MIN minuti.
+// La prova parte dal minuto corrente: il promemoria arriva allo scatto successivo.
+async function gestisciProvaSerata(request, env, data, ruolo) {
+  if (request.method !== "POST") return rispostaJson({ errore: "metodo non permesso" }, 405);
+  if (ruolo !== "genitore") return rispostaJson({ errore: "solo genitori" }, 403);
+  const corpo = await leggiCorpo(request);
+  if (!corpo || typeof corpo.attiva !== "boolean") return rispostaJson({ errore: "corpo non valido" }, 400);
+
+  if (!corpo.attiva) {
+    await env.ZAINO.delete(CHIAVE_PROVA);
+    return rispostaJson({ prova: null });
+  }
+
+  const config = await leggiConfig();
+  const motivo = motivoNoScuola(dataDaTesto(data), config);
+  if (motivo) {
+    return rispostaJson({ errore: `il ${data} non c'è scuola (${motivo}): la prova userebbe una lista vuota e non manderebbe nulla.` }, 400);
+  }
+  const prova = { data, inizio: Math.floor(Date.now() / 60000) * 60000 };
+  await env.ZAINO.put(CHIAVE_PROVA, JSON.stringify(prova), { expirationTtl: DURATA_PROVA_MIN * 60 });
+  return rispostaJson({ prova: descriviProva(prova) });
+}
+
 // ---------- Punto di ingresso ----------
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     // Il browser, prima di una richiesta con intestazioni personalizzate,
     // manda una richiesta OPTIONS per chiedere il permesso (CORS).
     if (request.method === "OPTIONS") {
@@ -400,7 +511,7 @@ export default {
           return rispostaJson({ ruolo, vapid: env.VAPID_PUBLIC || null });
         case "/stato":
           if (!RE_DATA.test(data)) return rispostaJson({ errore: "data non valida" }, 400);
-          return await gestisciStato(request, env, data);
+          return await gestisciStato(request, env, ctx, data);
         case "/serata":
           if (!RE_DATA.test(data)) return rispostaJson({ errore: "data non valida" }, 400);
           return await gestisciSerata(request, env, data, ruolo);
@@ -412,11 +523,23 @@ export default {
           return await gestisciElencoIscrizioni(request, env, ruolo);
         case "/prova":
           return await gestisciProva(request, env, ruolo);
+        case "/prova-serata":
+          if (!RE_DATA.test(data)) return rispostaJson({ errore: "data non valida" }, 400);
+          return await gestisciProvaSerata(request, env, data, ruolo);
         default:
           return rispostaJson({ errore: "non trovato" }, 404);
       }
     } catch (e) {
       return rispostaJson({ errore: "errore interno" }, 500);
     }
+  },
+
+  // Cron Trigger: Cloudflare lo chiama ogni minuto (orario UTC).
+  // scheduledTime = minuto previsto dello scatto: se l'avvio ritarda di qualche
+  // secondo, il calcolo resta quello del minuto giusto.
+  async scheduled(controller, env, ctx) {
+    ctx.waitUntil(eseguiCron(env, controller.scheduledTime).catch(e => {
+      console.log(`cron non riuscito: ${e && e.stack ? e.stack : e}`);
+    }));
   }
 };

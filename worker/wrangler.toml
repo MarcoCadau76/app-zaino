@@ -20,3 +20,8 @@ id = "dca758371f8d4cb089c95471994c6e9d"   # KV "zaino-stato"
 VAPID_PUBLIC = "BNmPyxMKCluC8MJsA-X9Nu4r7FMCJyNVlnFQn1aZUJmknG9jWHBLOBLkxTnpM5XC9gYAFfIoN-kLIhwMOXZvIQE"
 # Contatto richiesto da Apple/Google nella firma VAPID (URL o mailto:).
 VAPID_SUBJECT = "https://marcocadau76.github.io/app-zaino/"
+
+# Cron Trigger (orario UTC): ogni minuto. Il Worker calcola da sé l'ora italiana
+# e manda qualcosa solo nei minuti giusti (vedi serata.js). Nessuna scrittura nel KV.
+[triggers]
+crons = ["* * * * *"]

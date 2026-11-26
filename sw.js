@@ -1,4 +1,4 @@
-// ===== Service worker App Zaino — Fasi 3-4: app installabile, offline, notifiche push =====
+// ===== Service worker App Zaino — Fasi 3-5: app installabile, offline, notifiche push =====
 // Strategia "prima la rete": se c'è connessione scarico sempre la versione nuova
 // (così ogni aggiornamento su GitHub arriva subito) e ne tengo una copia;
 // la copia in cache si usa SOLO quando la rete non risponde.
@@ -6,11 +6,12 @@
 // Fase 4: riceve le notifiche push (testo già dentro, cifrato) e le mostra.
 
 // Cambia il numero quando cambi l'elenco dei file: la cache vecchia viene cancellata.
-const NOME_CACHE = "zaino-v1";
+const NOME_CACHE = "zaino-v2";
 
 const FILE_APP = [
   "./",
   "index.html",
+  "logica.js",
   "app.js",
   "config.json",
   "manifest.webmanifest",
