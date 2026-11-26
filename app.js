@@ -9,7 +9,8 @@ const NOMI_GIORNI = ["domenica", "lunedi", "martedi", "mercoledi", "giovedi", "v
 //   ruolo: "francesco" | "genitore"; vapid: chiave pubblica per le notifiche;
 //   notifiche: stato su questo telefono (vedi leggiStatoNotifiche);
 //   dispositivi: telefoni iscritti (solo schermata genitore).
-const sessione = { ruolo: null, vapid: null, notifiche: "non-supportate", dispositivi: [] };
+//   erroreNotifiche: motivo esatto quando notifiche = "errore".
+const sessione = { ruolo: null, vapid: null, notifiche: "non-supportate", erroreNotifiche: "", dispositivi: [] };
 
 // ---------- Funzioni "pure": non toccano la pagina, solo dati ----------
 
@@ -323,16 +324,48 @@ function serviceWorkerPronto(ms = 5000) {
   ]);
 }
 
+// Aspetta una promessa al massimo `ms` millisecondi; se non arriva risposta
+// rifiuta con un errore che contiene `messaggio` (così nulla resta appeso).
+function conTimeout(promessa, ms, messaggio) {
+  let timer;
+  const scadenza = new Promise((_, rifiuta) => {
+    timer = setTimeout(() => rifiuta(new Error(messaggio)), ms);
+  });
+  return Promise.race([promessa, scadenza]).finally(() => clearTimeout(timer));
+}
+
+// Testo leggibile di un errore del browser, con nome e messaggio esatti
+// (es. "AbortError: Registration failed - push service not available").
+function testoErrore(e) {
+  if (!e) return "errore sconosciuto";
+  if (e.name && e.name !== "Error") return `${e.name}: ${e.message}`;
+  return e.message || String(e);
+}
+
+// Istruzioni per riattivare un permesso negato, diverse per iPhone e Android.
+function istruzioniPermessoNegato() {
+  return eIos()
+    ? "Riattivale da Impostazioni → Notifiche → Zaino, poi riapri l'app."
+    : "Riattivale da Impostazioni del telefono → App → Zaino → Notifiche "
+      + "(oppure tieni premuta l'icona Zaino → Info app → Notifiche), poi riapri l'app.";
+}
+
 // Stato delle notifiche su questo telefono:
 //   "da-installare"  iPhone in Safari: le notifiche funzionano solo dall'app sulla Home;
 //   "non-supportate" browser senza Web Push (o Worker senza chiavi);
 //   "negate"         permesso rifiutato: si riattiva solo dalle impostazioni;
 //   "da-attivare"    serve il tocco su "Attiva notifiche";
-//   "attive"         iscritto: rimando l'iscrizione al Worker per tenerla allineata.
+//   "attive"         iscritto: rimando l'iscrizione al Worker per tenerla allineata;
+//   "errore"         controllo fallito: il motivo esatto va in sessione.erroreNotifiche.
 async function leggiStatoNotifiche() {
+  sessione.erroreNotifiche = "";
   try {
     if (eIos() && !eInstallata()) return "da-installare";
-    if (!pushSupportato() || !sessione.vapid) return "non-supportate";
+    if (!pushSupportato()) return "non-supportate";
+    if (!sessione.vapid) {
+      sessione.erroreNotifiche = "il server non ha fornito la chiave per le notifiche (VAPID).";
+      return "errore";
+    }
     if (Notification.permission === "denied") return "negate";
     if (Notification.permission !== "granted") return "da-attivare";
 
@@ -354,29 +387,72 @@ async function leggiStatoNotifiche() {
 
     inviaIscrizione(iscrizione).catch(() => {}); // in sottofondo, non blocca la pagina
     return "attive";
-  } catch {
-    return "non-supportate";
+  } catch (e) {
+    sessione.erroreNotifiche = testoErrore(e);
+    return "errore";
   }
 }
 
-// Attivazione dopo il tocco sul tasto. La richiesta del permesso deve essere
-// la PRIMA cosa fatta dopo il tocco: iOS la blocca se prima ci sono attese.
-async function attivaNotifiche() {
-  const permesso = await Notification.requestPermission();
+// Attivazione dopo il tocco sul tasto, in tre passaggi. Ogni passaggio ha un
+// tempo massimo e viene raccontato con `passo(testo)`; se qualcosa va storto
+// lancia un errore con un messaggio già pronto da mostrare.
+// La richiesta del permesso deve essere la PRIMA cosa fatta dopo il tocco:
+// iOS la blocca se prima ci sono attese.
+async function attivaNotifiche(passo) {
+  // 1. Permesso.
+  passo("1/3 Richiesta del permesso…");
+  let permesso;
+  try {
+    permesso = await conTimeout(Notification.requestPermission(), 30000, "timeout-permesso");
+  } catch (e) {
+    if (e.message === "timeout-permesso") {
+      throw new Error("Il telefono non ha mostrato la richiesta di permesso entro 30 secondi "
+        + "(Chrome a volte la nasconde). " + istruzioniPermessoNegato().replace("Riattivale", "Attivale"));
+    }
+    throw new Error(`Richiesta del permesso non riuscita: ${testoErrore(e)}`);
+  }
+  if (permesso === "denied") {
+    sessione.notifiche = "negate";
+    throw new Error(`Permesso negato. ${istruzioniPermessoNegato()}`);
+  }
   if (permesso !== "granted") {
-    sessione.notifiche = permesso === "denied" ? "negate" : "da-attivare";
-    return;
+    throw new Error("Hai chiuso la richiesta senza scegliere: tocca di nuovo il tasto e scegli \"Consenti\".");
   }
-  const reg = await serviceWorkerPronto();
-  let iscrizione = await reg.pushManager.getSubscription();
-  if (!iscrizione) {
-    iscrizione = await reg.pushManager.subscribe({
-      userVisibleOnly: true, // obbligatorio: ogni push mostra una notifica
-      applicationServerKey: base64UrlInBytes(sessione.vapid)
-    });
+
+  // 2. Iscrizione al servizio push del telefono (Apple o Google).
+  passo("2/3 Iscrizione al servizio di notifiche del telefono…");
+  let iscrizione;
+  try {
+    const reg = await serviceWorkerPronto(10000);
+    iscrizione = await reg.pushManager.getSubscription();
+    if (!iscrizione) {
+      iscrizione = await conTimeout(reg.pushManager.subscribe({
+        userVisibleOnly: true, // obbligatorio: ogni push mostra una notifica
+        applicationServerKey: base64UrlInBytes(sessione.vapid)
+      }), 20000, "nessuna risposta dal servizio di notifiche entro 20 secondi");
+    }
+  } catch (e) {
+    throw new Error(`Iscrizione non riuscita: ${testoErrore(e)}`);
   }
-  await inviaIscrizione(iscrizione);
+
+  // 3. Registrazione dell'iscrizione sul nostro Worker.
+  passo("3/3 Registrazione sul server…");
+  try {
+    await conTimeout(inviaIscrizione(iscrizione), 15000, "il server non ha risposto entro 15 secondi");
+  } catch (e) {
+    const motivo = e.message === "Failed to fetch" ? "connessione assente" : testoErrore(e);
+    throw new Error(`Registrazione sul server non riuscita: ${motivo}`);
+  }
   sessione.notifiche = "attive";
+}
+
+// Riga sotto il tasto "Attiva notifiche": passaggio in corso (grigio) o errore (rosso).
+function mostraEsitoNotifiche(testo, errore) {
+  const el = document.getElementById("esito-notifiche");
+  if (!el) return;
+  el.textContent = testo;
+  el.className = errore ? "errore" : "nota";
+  el.hidden = false;
 }
 
 // Riga sulle notifiche mostrata in fondo a ogni schermata.
@@ -385,13 +461,14 @@ function htmlNotifiche() {
     case "attive":
       return `<p class="nota">🔔 Notifiche attive su questo telefono.</p>`;
     case "da-attivare":
-      return `<button id="attiva-notifiche">🔔 Attiva notifiche</button>`;
+      return `<button id="attiva-notifiche">🔔 Attiva notifiche</button>
+        <p id="esito-notifiche" hidden></p>`;
     case "negate":
-      return `<p class="nota">🔕 Notifiche bloccate. ${eIos()
-        ? "Riattivale da Impostazioni → Notifiche → Zaino."
-        : "Riattivale dalle impostazioni del telefono: App → Zaino → Notifiche."}</p>`;
+      return `<p class="nota">🔕 Notifiche bloccate. ${istruzioniPermessoNegato()}</p>`;
     case "da-installare":
       return ""; // ci pensa il suggerimento di installazione
+    case "errore":
+      return `<p class="errore" id="esito-notifiche">Notifiche: ${escapa(sessione.erroreNotifiche)}</p>`;
     default:
       return `<p class="nota">Notifiche non disponibili su questo browser.</p>`;
   }
@@ -413,14 +490,16 @@ function collegaEsci() {
     avvia();
   });
 
+  // "Attiva notifiche": sotto il tasto racconto ogni passaggio; in caso di
+  // errore mostro il motivo esatto e riattivo il tasto per riprovare.
   const attiva = document.getElementById("attiva-notifiche");
   if (attiva) attiva.addEventListener("click", async () => {
     attiva.disabled = true;
     try {
-      await attivaNotifiche();
-      avvia(); // ridisegno con lo stato aggiornato
+      await attivaNotifiche(testo => mostraEsitoNotifiche(testo, false));
+      avvia(); // ridisegno: comparirà "Notifiche attive su questo telefono"
     } catch (e) {
-      mostraErrore(`Notifiche non attivate: ${e.message}`);
+      mostraEsitoNotifiche(e.message, true);
       attiva.disabled = false;
     }
   });
